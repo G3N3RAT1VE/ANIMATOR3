@@ -9,10 +9,11 @@ namespace riq
 
 namespace Colours
 {
-    const juce::Colour bg { 0xff15171c }, panel { 0xff1e2128 }, panelHi { 0xff272b34 }, line { 0xff353a45 },
-                       text { 0xffd8dce4 }, dim { 0xff7d8594 }, accent { 0xffff6a1a }, live { 0xff3ddc84 },
-                       frozen { 0xff4aa8ff }, armed { 0xffffd23f };
-    const juce::Colour stem[3] { juce::Colour (0xffdfe3ea), juce::Colour (0xff6a5cff), juce::Colour (0xff2fc4b2) };
+    const juce::Colour bg { 0xff070807 }, panel { 0xff0e110e }, panelHi { 0xff172017 }, line { 0xff243024 },
+                       text { 0xffe2f5da }, dim { 0xff6a8565 }, accent { 0xffd4ff1e }, edit { 0xffff2bd6 },
+                       live { 0xff39ff88 }, frozen { 0xff00c8ff }, armed { 0xffffd000 }, warn { 0xffff2e63 },
+                       wave { 0xff040504 };
+    const juce::Colour stem[3] { juce::Colour (0xff9dff2e), juce::Colour (0xffb45cff), juce::Colour (0xff19e3ff) };
 }
 
 class LookAndFeel : public juce::LookAndFeel_V4
@@ -21,9 +22,11 @@ public:
     LookAndFeel();
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float start, float end, juce::Slider&) override;
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool over, bool down) override;
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool over, bool down) override;
     void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
     juce::Font getTextButtonFont (juce::TextButton&, int h) override;
     juce::Font getComboBoxFont (juce::ComboBox&) override;
+    juce::Font getPopupMenuFont() override;
 };
 
 // Rotary knob with a caption, bound to a parameter.
@@ -31,7 +34,7 @@ class Knob : public juce::Component
 {
 public:
     Knob (juce::AudioProcessorValueTreeState& state, const juce::String& paramId, const juce::String& caption,
-          juce::Colour colour = Colours::accent, bool captionOnTop = true);
+          juce::Colour colour = Colours::accent);
     void resized() override;
     void paint (juce::Graphics&) override;
 
@@ -39,7 +42,6 @@ public:
 
 private:
     juce::String caption;
-    bool captionOnTop;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 
@@ -53,17 +55,18 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> attachment;
 };
 
-// Choice parameter as a row of segment buttons (like Rhythmiq's 1/4 | 1/8 | 1/16 selectors).
+// Choice parameter as a row of segment buttons.
 class Segmented : public juce::Component, public juce::SettableTooltipClient
 {
 public:
-    Segmented (juce::AudioProcessorValueTreeState& state, const juce::String& paramId);
+    Segmented (juce::AudioProcessorValueTreeState& state, const juce::String& paramId, juce::Colour colour = Colours::accent);
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
 
 private:
     juce::StringArray items;
     int selected = 0;
+    juce::Colour colour;
     juce::ParameterAttachment attachment;
 };
 
@@ -105,7 +108,38 @@ private:
     float displayGain = 0.0f;
 };
 
-// Master display: summed waveform, bar numbers and the keyboard-fill key strip.
+// Autopilot plan for the current phrase: one row per stem, one cell per bar.
+class PhraseMap : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    explicit PhraseMap (RiqLiveProcessor& p) : proc (p) {}
+    void paint (juce::Graphics&) override;
+
+private:
+    RiqLiveProcessor& proc;
+};
+
+// Top deck: IQ controls, phrase map, live meters and the autopilot settings.
+class AutopilotDeck : public juce::Component
+{
+public:
+    explicit AutopilotDeck (RiqLiveProcessor& p);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    Knob iqArrange;
+
+private:
+    RiqLiveProcessor& proc;
+    Toggle iqEvolve, iqReverse;
+    std::array<std::unique_ptr<Toggle>, kNumStems> links;
+    PhraseMap phraseMap;
+    Segmented apPhrase, apEvolveEvery;
+    Knob apFill, apMotion, apRatchet, apEvolveChance, apRevDepth, apDrop;
+    juce::Rectangle<int> metersArea;
+};
+
+// Master strip: loop / fill / quantise settings, summed waveform and the keyboard-fill keys.
 class MasterDisplay : public juce::Component
 {
 public:
@@ -116,13 +150,35 @@ public:
 private:
     RiqLiveProcessor& proc;
     Segmented fillSize, loopLen;
+    Choice freezeQ, sceneQ;
     WaveView wave;
 };
 
-class StemColumn : public juce::Component
+// Preset browser: whole-plugin presets stored as files in Documents/AUTOPILOT/Presets.
+class PresetBar : public juce::Component
 {
 public:
-    StemColumn (RiqLiveProcessor& p, int stemIndex);
+    explicit PresetBar (RiqLiveProcessor& p);
+    void resized() override;
+    void paint (juce::Graphics&) override;
+    void refresh();
+
+private:
+    void showMenu();
+    void step (int delta);
+    void askName (const juce::String& title, const juce::String& initial, std::function<void (juce::String)> onOk);
+    void confirmDelete();
+
+    RiqLiveProcessor& proc;
+    juce::TextButton prev { "<" }, next { ">" }, name, save { "SAVE" }, del { "DEL" };
+    juce::String shown;
+};
+
+// One horizontal lane per stem.
+class StemLane : public juce::Component
+{
+public:
+    StemLane (RiqLiveProcessor& p, int stemIndex);
     void paint (juce::Graphics&) override;
     void resized() override;
     void refresh();
@@ -130,11 +186,11 @@ public:
 private:
     RiqLiveProcessor& proc;
     int stem;
-    Choice source;
+    Choice source, keep;
     Segmented slice;
     WaveView wave;
     Momentary hold;
-    Toggle capture;
+    Toggle capture, autoLink;
     Knob arrange, reverse, silence, ratchet, pan, gain;
     Momentary evolveArr, evolveRev;
     Toggle on, solo;
@@ -170,22 +226,19 @@ public:
 private:
     void timerCallback() override;
     void updateSceneButtons();
-    juce::Rectangle<int> assistantArea() const;
-    juce::Rectangle<int> autopilotArea() const;
+    juce::Rectangle<int> meterArea() const;
 
     RiqLiveProcessor& proc;
     riq::LookAndFeel lnf;
 
-    riq::Choice protect, freezeQ, sceneQ;
-    riq::Knob masterGain;
+    riq::PresetBar presetBar;
+    riq::Choice protect;
+    riq::Segmented style;
+    riq::Knob masterGain, limDrive, limCeiling;
     riq::Toggle limiter;
+    riq::AutopilotDeck deck;
     riq::MasterDisplay master;
-    riq::Knob iqArrange;
-    riq::Toggle iqEvolve, iqReverse;
-    riq::Segmented apPhrase, apEvolveEvery;
-    riq::Knob apFill, apMotion, apRatchet, apEvolveChance, apRevDepth, apDrop;
-    std::array<std::unique_ptr<riq::Toggle>, riq::kNumStems> links;
-    std::array<std::unique_ptr<riq::StemColumn>, riq::kNumStems> columns;
+    std::array<std::unique_ptr<riq::StemLane>, riq::kNumStems> lanes;
     std::array<juce::TextButton, riq::kNumScenes> sceneButtons;
     juce::TextButton saveButton { "SAVE" };
     juce::TooltipWindow tooltips { this, 600 };
@@ -193,7 +246,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RiqLiveEditor)
 };
 
-// Editor of the RiQ Live Send effect.
+// Editor of the AUTOPILOT Send effect.
 class RiqSendEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:

@@ -67,7 +67,7 @@ struct TimelineRing
     std::atomic<juce::uint32> lastWriteMs;
 };
 
-// One entry per RiQ Live Send instance. Every Send writes its own ring, and the engine
+// One entry per AUTOPILOT Send instance. Every Send writes its own ring, and the engine
 // sums all entries that point at a slot - like routing several tracks into one audio
 // track - so any number of tracks can feed the same stem.
 struct SendEntry
@@ -115,7 +115,7 @@ struct SharedBusData
     SendEntry sends[kMaxSends];
 };
 
-// One bus per host process, shared by the RiQ Live instrument and the RiQ Live Send
+// One bus per host process, shared by the AUTOPILOT instrument and the AUTOPILOT Send
 // effect. They are separate DLLs, so a static would not be shared: on Windows the bus
 // lives in a named, process-local file mapping instead.
 class SharedBus

@@ -33,13 +33,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
     }
 
     choice (ID::loopLen, "Loop Length", { "1 Bar", "2 Bars", "4 Bars" }, 0);
-    choice (ID::protect, "Protect", { "Off", "Downbeat", "1 & 3", "All Beats" }, 2);
-    choice (ID::freezeQ, "Freeze Quantize", { "Off", "Beat", "Bar", "Loop" }, 3);
-    choice (ID::sceneQ, "Scene Quantize", { "Off", "Beat", "Bar" }, 2);
+    // New choices are only ever appended so saved sets keep their meaning.
+    const StringArray keeps { "Off", "Downbeat", "1 & 3", "All Beats", "2 & 4", "Off-Beats" };
+    choice (ID::protect, "Protect", keeps, 2);
+    choice (ID::freezeQ, "Freeze Quantize", { "Off", "Beat", "Bar", "Loop", "1/8", "1/16" }, 3);
+    choice (ID::sceneQ, "Scene Quantize", { "Off", "Beat", "Bar", "2 Bars", "4 Bars", "8 Bars", "16 Bars" }, 2);
+    choice (ID::style, "Grid Style", { "Classic", "Hitech" }, 1);
     choice (ID::fillSize, "Fill Size", slices, 1);
     layout.add (std::make_unique<AudioParameterInt> (ParameterID { ID::fillNote, 1 }, "Fill Base Note", 0, 112, 36));
     knob (ID::masterGain, "Master Gain", -24.0f, 12.0f, 0.0f, "dB");
     toggle (ID::limiter, "Limiter", true);
+    knob (ID::limCeiling, "Limiter Ceiling", -3.0f, 0.0f, 0.0f, "dBTP");
+    knob (ID::limDrive, "Limiter Drive", 0.0f, 18.0f, 0.0f, "dB");
+    knob (ID::limRelease, "Limiter Release", 10.0f, 500.0f, 60.0f, "ms");
     knob (ID::iqArrange, "IQ Arrange", 0.0f, 1.0f, 0.0f);
     toggle (ID::iqEvolve, "IQ Evolve", false);
     toggle (ID::iqReverse, "IQ Reverse", false);
@@ -58,6 +64,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
         const auto n = "Stem " + String (s + 1) + " ";
         choice (ID::stem (s, "src"), n + "Source", { "Send A", "Send B", "Send C" }, s);
         choice (ID::stem (s, "out"), n + "Output", { "Mix", "Own" }, 0);
+        StringArray stemKeeps { "Global" };
+        stemKeeps.addArray (keeps);
+        choice (ID::stem (s, "keep"), n + "Keep", stemKeeps, 0);
         toggle (ID::stem (s, "freeze"), n + "Buffer Frozen", false);
         choice (ID::stem (s, "slice"), n + "Slice Size", slices, 2);
         knob (ID::stem (s, "arrange"), n + "Arrange", 0.0f, 1.0f, 0.0f);
@@ -133,10 +142,17 @@ void RiqLiveProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     sr = sampleRate;
     delaySamples = juce::jmax (64, samplesPerBlock);
-    setLatencySamples (isEngineMode() ? delaySamples : 0);
 
     if (sendMode)
+    {
+        setLatencySamples (0);
         return;
+    }
+
+    for (auto& l : limiters)
+        l.prepare (sampleRate);
+    loudness.prepare (sampleRate);
+    setLatencySamples (delaySamples + limiters[0].getLatency());
 
     for (auto& s : stems)
         s.prepare (sampleRate);
@@ -147,11 +163,6 @@ void RiqLiveProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     mixBuf.setSize (2, maxBlock);
     for (auto& b : stemBufs)
         b.setSize (2, maxBlock);
-
-    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlock, 2 };
-    limiter.prepare (spec);
-    limiter.setThreshold (-0.3f);
-    limiter.setRelease (80.0f);
 
     masterGain.reset (sampleRate, 0.02);
     masterGain.setCurrentAndTargetValue (dbToGain (param (ID::masterGain)));
@@ -357,7 +368,8 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         }
         else
         {
-            const double grid = q == 1 ? 1.0 : bpb;
+            constexpr double kSceneBars[] = { 0.0, 0.0, 1.0, 2.0, 4.0, 8.0, 16.0 };
+            const double grid = q == 1 ? 1.0 : kSceneBars[juce::jlimit (2, 6, q)] * bpb;
             sceneAt = std::ceil (ppqT / grid - 1.0e-9) * grid;
             sceneQueued = req;
         }
@@ -384,6 +396,7 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             for (auto& s : stems)
                 s.resetPlayback();
         wasPlaying = false;
+        hostBarPrev = std::numeric_limits<juce::int64>::min();
         return;
     }
 
@@ -400,40 +413,40 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // ---- shared per-block settings ----
     const double loopBeats = kLoopBars[juce::jlimit (0, 2, (int) param (ID::loopLen))] * bpb;
-    const auto protect = (Protect) juce::jlimit (0, 3, (int) param (ID::protect));
+    const int globalKeep = juce::jlimit (0, 5, (int) param (ID::protect));
+    const auto style = (GridStyle) juce::jlimit (0, 1, (int) param (ID::style));
     const int freezeQ = (int) param (ID::freezeQ);
-    const float iq = param (ID::iqArrange);
-    const bool iqEvolve = param (ID::iqEvolve) > 0.5f;
-    const bool iqReverse = param (ID::iqReverse) > 0.5f;
 
-    const auto barIdx = (juce::int64) std::floor (ppqT / bpb);
+    // The autopilot counts the bars that were actually played, so a host loop (e.g. 2 bars
+    // looped in Live) does not reset the phrase: every crossed bar line moves it on by one.
+    // (Counted on the host position itself: the latency-delayed position steps back before the
+    // loop start at every wrap, which would count one wrap as two bars.)
+    const auto hostBar = (juce::int64) std::floor (ppq / bpb + 1.0e-9);
+    if (hostBarPrev == std::numeric_limits<juce::int64>::min())
+        apBar = hostBar;                       // transport (re)started: follow the song bars
+    else if (hostBar == hostBarPrev + 1 || hostBar < hostBarPrev)
+        ++apBar;                               // next bar, or the host loop wrapped around
+    else if (hostBar > hostBarPrev + 1)
+        apBar = hostBar;                       // relocated forward
+    hostBarPrev = hostBar;
 
-    // ---- Beat Assistant autopilot ----
-    constexpr int kPhraseBars[] = { 4, 8, 16 };
-    constexpr int kEvolveBars[] = { 1, 2, 4, 8, 16 };
-    const int phraseBars = kPhraseBars[juce::jlimit (0, 2, (int) param (ID::apPhrase))];
-    const int phrasePosNow = (int) (((barIdx % phraseBars) + phraseBars) % phraseBars);
-    const bool fillBar = phrasePosNow == phraseBars - 1;
-    const bool halfFillBar = phraseBars >= 8 && phrasePosNow == phraseBars / 2 - 1;
-    const float apFill = param (ID::apFill), apMotion = param (ID::apMotion), apRatchet = param (ID::apRatchet);
-    const float apRevDepth = param (ID::apRevDepth), apDrop = param (ID::apDrop);
-    phrasePos.store (phrasePosNow);
-    phraseLen.store (phraseBars);
+    const auto barIdx = apBar;
+    currentBar.store (barIdx);
 
-    std::array<bool, kNumStems> linkedArr {};
-    for (int s = 0; s < kNumStems; ++s)
-        linkedArr[(size_t) s] = param (ID::stem (s, "link")) > 0.5f;
+    // ---- Beat Assistant autopilot (same pure function the phrase map draws) ----
+    const auto apIn = makeAutopilotInput();
+    const auto plan = planAutopilotBar (apIn, barIdx);
+    phrasePos.store (plan.phrasePos);
+    phraseLen.store (apIn.phraseBars);
 
     if (barIdx != lastIqBar)
     {
-        // IQ Evolve presses the stem Evolve buttons by itself at chosen bars.
-        const int every = kEvolveBars[juce::jlimit (0, 4, (int) param (ID::apEvolveEvery))];
-        if (iqEvolve && lastIqBar != std::numeric_limits<juce::int64>::min() && barIdx % every == 0)
+        // IQ Evolve presses the stem Evolve buttons by itself at the planned bars.
+        if (lastIqBar != std::numeric_limits<juce::int64>::min())
         {
-            const float chance = param (ID::apEvolveChance);
             for (int s = 0; s < kNumStems; ++s)
             {
-                if (! linkedArr[(size_t) s] || hash01 ((juce::uint32) barIdx, (juce::uint32) s, 31u) >= chance)
+                if (! plan.stems[(size_t) s].evolve)
                     continue;
                 for (int k : { s, s + kNumStems })
                     seeds[(size_t) k].store (hash32 (seeds[(size_t) k].load(), (juce::uint32) barIdx, 33u) | 1u);
@@ -441,27 +454,6 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             }
         }
         lastIqBar = barIdx;
-    }
-
-    // Drops: a linked stem sits out a bar now and then, never on the phrase start,
-    // and at least one linked stem always keeps playing.
-    std::array<bool, kNumStems> drop {};
-    if (iq > 0.0f && apDrop > 0.0f && phrasePosNow != 0)
-    {
-        int keep = -1, linkedCount = 0, droppedCount = 0;
-        float best = 2.0f;
-        for (int s = 0; s < kNumStems; ++s)
-        {
-            if (! linkedArr[(size_t) s])
-                continue;
-            ++linkedCount;
-            const float h = hash01 ((juce::uint32) barIdx, (juce::uint32) s, 41u);
-            drop[(size_t) s] = h < apDrop * 0.5f;
-            droppedCount += drop[(size_t) s] ? 1 : 0;
-            if (h < best) { best = h; keep = s; }
-        }
-        if (linkedCount > 0 && droppedCount == linkedCount)
-            drop[(size_t) keep] = false;
     }
 
     bool anySolo = false;
@@ -501,54 +493,31 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             std::fill (iR, iR + m, 0.0f);
         }
 
-        const bool linked = linkedArr[(size_t) s];
+        const auto& ap = plan.stems[(size_t) s];
         StemSettings st;
         st.loopBeats = loopBeats;
         st.sliceBeats = kSliceBeats[juce::jlimit (0, 3, (int) param (ID::stem (s, "slice")))];
         st.beatsPerBar = bpb;
-        st.protect = protect;
-        st.arrange = param (ID::stem (s, "arrange"));
-        st.ratchet = param (ID::stem (s, "ratchet"));
-        st.reverse = param (ID::stem (s, "reverse"));
+        const int stemKeep = (int) param (ID::stem (s, "keep"));
+        st.protect = (Protect) juce::jlimit (0, 5, stemKeep > 0 ? stemKeep - 1 : globalKeep);
+        st.style = style;
+        st.fillBar = plan.fillBar;
+        st.arrange = ap.arrange;
+        st.ratchet = ap.ratchet;
+        st.reverse = ap.reverse;
         st.silence = param (ID::stem (s, "silence"));
         st.seed = seeds[(size_t) s].load();
         st.seedRev = seeds[(size_t) (s + kNumStems)].load();
-
-        if (linked && iq > 0.0f)
-        {
-            // IQ Arrange takes over the stem Arrange knob: gentle motion from bar to bar,
-            // building into a fill at the end of the phrase (and a smaller one half way).
-            const float wobble = hash01 ((juce::uint32) barIdx, (juce::uint32) s, 11u);
-            float a = iq * (0.55f + apMotion * (wobble - 0.5f) * 0.9f);
-            float r = iq * apRatchet * 0.15f * wobble;
-            if (fillBar)
-            {
-                a = juce::jmax (a, iq * (0.5f + 0.5f * apFill) + apFill * 0.25f);
-                r = juce::jmax (r, apRatchet * apFill * (0.4f + 0.6f * iq));
-            }
-            else if (halfFillBar)
-            {
-                a = juce::jmax (a, iq * (0.45f + 0.35f * apFill));
-                r = juce::jmax (r, apRatchet * apFill * 0.5f * iq);
-            }
-            st.arrange = juce::jlimit (0.0f, 1.0f, a);
-            st.ratchet = juce::jlimit (0.0f, 1.0f, juce::jmax (st.ratchet, r));
-        }
-        if (linked && iqReverse)
-        {
-            const float base = (barIdx & 1) ? apRevDepth : apRevDepth * 0.35f;
-            st.reverse = juce::jmin (1.0f, juce::jmax (st.reverse * (1.0f + apRevDepth), base));
-        }
         effArrange[s].store (st.arrange);
         effReverse[s].store (st.reverse);
         effRatchet[s].store (st.ratchet);
-        dropped[s].store (drop[(size_t) s] ? 1 : 0);
+        dropped[s].store (ap.drop ? 1 : 0);
 
         st.freeze = param (ID::stem (s, "freeze")) > 0.5f;
         st.freezeQuant = freezeQ;
         st.roll = param (ID::stem (s, "roll")) > 0.5f;
         const bool solo = param (ID::stem (s, "solo")) > 0.5f;
-        st.audible = param (ID::stem (s, "on")) > 0.5f && (! anySolo || solo) && ! drop[(size_t) s];
+        st.audible = param (ID::stem (s, "on")) > 0.5f && (! anySolo || solo) && ! ap.drop;
 
         const float g = dbToGain (param (ID::stem (s, "gain")));
         const float pan = param (ID::stem (s, "pan"));
@@ -573,6 +542,11 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     mixBuf.clear (0, 0, n);
     mixBuf.clear (1, 0, n);
 
+    const bool limOn = param (ID::limiter) > 0.5f;
+    const float drive = dbToGain (param (ID::limDrive));
+    const float ceiling = juce::Decibels::decibelsToGain (param (ID::limCeiling));
+    const float release = param (ID::limRelease);
+
     for (int s = 0; s < kNumStems; ++s)
     {
         auto& sb = stemBufs[(size_t) s];
@@ -583,6 +557,8 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             for (int ch = 0; ch < 2; ++ch)
                 mixBuf.addFrom (ch, 0, sb, ch, 0, n);
 
+        // Each stem output gets its own true-peak limiter (and the same latency as the Mix).
+        limiters[(size_t) s + 1].process (sb.getWritePointer (0), sb.getWritePointer (1), n, limOn, drive, ceiling, release);
         if (s + 1 < getBusCount (false) && getBus (false, s + 1)->isEnabled())
         {
             auto out = getBusBuffer (buffer, false, s + 1);
@@ -591,12 +567,11 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         }
     }
 
-    if (param (ID::limiter) > 0.5f)
-    {
-        juce::dsp::AudioBlock<float> block (mixBuf);
-        auto sub = block.getSubBlock (0, (size_t) n);
-        limiter.process (juce::dsp::ProcessContextReplacing<float> (sub));
-    }
+    limiters[0].process (mixBuf.getWritePointer (0), mixBuf.getWritePointer (1), n, limOn, drive, ceiling, release);
+    loudness.process (mixBuf.getReadPointer (0), mixBuf.getReadPointer (1), n);
+    mixLufs.store (loudness.getShortTermLufs());
+    mixPeakDb.store (loudness.getPeakDb());
+    limiterGrDb.store (limiters[0].getGainReductionDb());
 
     auto mainOut = getBusBuffer (buffer, false, 0);
     for (int ch = 0; ch < juce::jmin (2, mainOut.getNumChannels()); ++ch)
@@ -649,7 +624,7 @@ bool RiqLiveProcessor::isSceneValid (int index) const
     return index >= 0 && index < kNumScenes && scenes[(size_t) index].valid;
 }
 
-void RiqLiveProcessor::getStateInformation (juce::MemoryBlock& destData)
+std::unique_ptr<juce::XmlElement> RiqLiveProcessor::createStateXml()
 {
     auto state = apvts.copyState();
 
@@ -679,19 +654,14 @@ void RiqLiveProcessor::getStateInformation (juce::MemoryBlock& destData)
     for (auto& v : seeds)
         sd.add (juce::String ((juce::int64) v.load()));
     state.setProperty ("seeds", sd.joinIntoString (","), nullptr);
+    state.setProperty ("presetName", getCurrentPresetName(), nullptr);
     state.appendChild (sceneTree, nullptr);
-
-    if (auto xml = state.createXml())
-        copyXmlToBinary (*xml, destData);
+    return state.createXml();
 }
 
-void RiqLiveProcessor::setStateInformation (const void* data, int sizeInBytes)
+void RiqLiveProcessor::applyStateXml (const juce::XmlElement& xml)
 {
-    auto xml = getXmlFromBinary (data, sizeInBytes);
-    if (xml == nullptr)
-        return;
-
-    auto state = juce::ValueTree::fromXml (*xml);
+    auto state = juce::ValueTree::fromXml (xml);
     if (! state.hasType (apvts.state.getType()))
         return;
 
@@ -731,8 +701,145 @@ void RiqLiveProcessor::setStateInformation (const void* data, int sizeInBytes)
         }
     }
 
+    {
+        const juce::ScopedLock sl (presetLock);
+        presetName = state.getProperty ("presetName").toString();
+    }
+
     state.removeChild (sceneTree, nullptr);
     apvts.replaceState (state);
+}
+
+void RiqLiveProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    if (auto xml = createStateXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void RiqLiveProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+        applyStateXml (*xml);
+}
+
+riq::AutopilotInput RiqLiveProcessor::makeAutopilotInput() const
+{
+    constexpr int kPhraseBars[] = { 4, 8, 16 };
+    constexpr int kEvolveBars[] = { 1, 2, 4, 8, 16 };
+
+    AutopilotInput in;
+    in.iq = param (ID::iqArrange);
+    in.iqEvolve = param (ID::iqEvolve) > 0.5f;
+    in.iqReverse = param (ID::iqReverse) > 0.5f;
+    for (int s = 0; s < kNumStems; ++s)
+    {
+        in.linked[(size_t) s] = param (ID::stem (s, "link")) > 0.5f;
+        in.arrange[(size_t) s] = param (ID::stem (s, "arrange"));
+        in.ratchet[(size_t) s] = param (ID::stem (s, "ratchet"));
+        in.reverse[(size_t) s] = param (ID::stem (s, "reverse"));
+    }
+    in.fill = param (ID::apFill);
+    in.motion = param (ID::apMotion);
+    in.fillRatchet = param (ID::apRatchet);
+    in.revDepth = param (ID::apRevDepth);
+    in.drop = param (ID::apDrop);
+    in.evolveChance = param (ID::apEvolveChance);
+    in.phraseBars = kPhraseBars[juce::jlimit (0, 2, (int) param (ID::apPhrase))];
+    in.evolveEvery = kEvolveBars[juce::jlimit (0, 4, (int) param (ID::apEvolveEvery))];
+    return in;
+}
+
+//==============================================================================
+juce::File RiqLiveProcessor::getPresetFolder()
+{
+    const auto overrideDir = juce::SystemStats::getEnvironmentVariable ("AUTOPILOT_PRESET_DIR", {});
+    auto dir = overrideDir.isNotEmpty() ? juce::File (overrideDir)
+                                        : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                                              .getChildFile ("AUTOPILOT").getChildFile ("Presets");
+    dir.createDirectory();
+    return dir;
+}
+
+juce::StringArray RiqLiveProcessor::getPresetNames()
+{
+    juce::StringArray names;
+    for (const auto& f : getPresetFolder().findChildFiles (juce::File::findFiles, false, "*.riqpreset"))
+        names.add (f.getFileNameWithoutExtension());
+    names.sortNatural();
+    return names;
+}
+
+static juce::File presetFile (const juce::String& name)
+{
+    return RiqLiveProcessor::getPresetFolder().getChildFile (juce::File::createLegalFileName (name.trim()) + ".riqpreset");
+}
+
+bool RiqLiveProcessor::savePreset (const juce::String& name)
+{
+    if (name.trim().isEmpty())
+        return false;
+    {
+        const juce::ScopedLock sl (presetLock);
+        presetName = juce::File::createLegalFileName (name.trim());
+    }
+    auto xml = createStateXml();
+    return xml != nullptr && xml->writeTo (presetFile (name));
+}
+
+bool RiqLiveProcessor::loadPreset (const juce::String& name)
+{
+    const auto file = presetFile (name);
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr)
+        return false;
+    applyStateXml (*xml);
+    const juce::ScopedLock sl (presetLock);
+    presetName = file.getFileNameWithoutExtension();
+    return true;
+}
+
+bool RiqLiveProcessor::deletePreset (const juce::String& name)
+{
+    const bool ok = presetFile (name).deleteFile();
+    const juce::ScopedLock sl (presetLock);
+    if (ok && presetName == name)
+        presetName.clear();
+    return ok;
+}
+
+bool RiqLiveProcessor::renamePreset (const juce::String& from, const juce::String& to)
+{
+    const auto src = presetFile (from), dst = presetFile (to);
+    if (to.trim().isEmpty() || ! src.existsAsFile() || dst.exists())
+        return false;
+    if (! src.moveFileTo (dst))
+        return false;
+    const juce::ScopedLock sl (presetLock);
+    if (presetName == from)
+        presetName = dst.getFileNameWithoutExtension();
+    return true;
+}
+
+void RiqLiveProcessor::loadInitPreset()
+{
+    for (auto* p : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+    {
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        for (int i = 1; i < kNumScenes; ++i)
+            scenes[(size_t) i].valid = false;
+    }
+    for (size_t s = 0; s < seeds.size(); ++s)
+        seeds[s].store ((juce::uint32) s * 7919u + 1u);
+    const juce::ScopedLock sl (presetLock);
+    presetName.clear();
+}
+
+juce::String RiqLiveProcessor::getCurrentPresetName() const
+{
+    const juce::ScopedLock sl (presetLock);
+    return presetName;
 }
 
 juce::AudioProcessorEditor* RiqLiveProcessor::createEditor()

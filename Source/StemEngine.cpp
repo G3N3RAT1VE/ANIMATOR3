@@ -54,6 +54,8 @@ void StemEngine::updateCaptureState (const StemSettings& s, double ppq) noexcept
             case 1:  q = 1.0; break;
             case 2:  q = s.beatsPerBar; break;
             case 3:  q = s.loopBeats; break;
+            case 4:  q = 0.5; break;
+            case 5:  q = 0.25; break;
             default: q = 0.0; break;
         }
 
@@ -170,6 +172,10 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
     const double inBar = wrapBeat (pos, bpb);
     const bool onBeat = std::abs (inBar - std::round (inBar)) < 1.0e-6;
 
+    const double beatIdx = std::floor (inBar + 1.0e-9);
+    const double frac = inBar - beatIdx;
+    const bool oddBeat = onBeat && ((int) std::round (inBar) % 2) == 1;
+
     bool strong = false;
     switch (s.protect)
     {
@@ -177,21 +183,42 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
         case Protect::downbeat:    strong = inBar < 1.0e-6; break;
         case Protect::oneAndThree: strong = inBar < 1.0e-6 || (std::fmod (bpb, 2.0) < 1.0e-6 && std::abs (inBar - bpb * 0.5) < 1.0e-6); break;
         case Protect::allBeats:    strong = onBeat; break;
+        case Protect::twoAndFour:  strong = oddBeat; break;
+        case Protect::offBeats:    strong = std::abs (frac - 0.5) < 1.0e-6; break;
     }
 
     if (! strong)
     {
-        // Weak positions get more action the further they are from the beat,
-        // and the end of the bar gets more than the start (fills).
-        const double fr = wrapBeat (pos, 1.0);
-        const float weakness = fr < 1.0e-6 ? 0.6f : (std::abs (fr - 0.5) < 1.0e-6 ? 0.85f : 1.0f);
-        const float endBoost = 0.75f + 0.5f * (float) (inBar / bpb);
-        const float w = weakness * endBoost;
         const auto seed = s.seed;
+        float wArr, wRat, wRev;
+        bool grooveSafe = false; // only moves that keep the 16th phase inside the beat
+        bool rollZone = false;
 
-        if (hash01 (seed, (juce::uint32) j, 1) < s.arrange * w)
+        if (s.style == GridStyle::hitech)
         {
-            const float t = hash01 (seed, (juce::uint32) j, 2);
+            // Hitech: the groove bars keep rolling (kick + bass 16ths stay in phase),
+            // the edits pile up in the last beat of the bar - the last two in a phrase-end
+            // bar - where retriggers accelerate x2 -> x4 into the next downbeat.
+            const bool lastBeat = beatIdx >= bpb - 1.0 - 1.0e-9;
+            rollZone = lastBeat || (s.fillBar && beatIdx >= bpb - 2.0 - 1.0e-9);
+            const bool call = bpb >= 4.0 && beatIdx >= bpb * 0.5 - 1.0 - 1.0e-9 && beatIdx < bpb * 0.5 - 1.0e-9 && frac >= 0.5 - 1.0e-9;
+            wArr = rollZone ? 1.3f : call ? 0.9f : 0.5f;
+            wRat = rollZone ? 1.6f : call ? 0.5f : 0.08f;
+            wRev = rollZone ? 1.0f : 0.3f;
+            grooveSafe = ! rollZone;
+        }
+        else
+        {
+            // Classic: weak positions get more action the further they are from the beat,
+            // and the end of the bar gets more than the start (fills).
+            const float weakness = frac < 1.0e-6 ? 0.6f : (std::abs (frac - 0.5) < 1.0e-6 ? 0.85f : 1.0f);
+            const float endBoost = 0.75f + 0.5f * (float) (inBar / bpb);
+            wArr = wRat = wRev = weakness * endBoost;
+        }
+
+        if (hash01 (seed, (juce::uint32) j, 1) < s.arrange * wArr)
+        {
+            const float t = grooveSafe ? 1.0f : hash01 (seed, (juce::uint32) j, 2);
             if (t < 0.4f)
             {
                 d.src = (j - 1 + n) % n; // loop the previous slice
@@ -212,17 +239,21 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
             }
         }
 
-        if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * w)
+        if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * wRat)
         {
-            const float u = hash01 (seed, (juce::uint32) j, 4);
-            int r = u < 0.65f ? 2 : 4; // straight subdivisions only, no triplets
+            // Straight subdivisions only, no triplets.
+            int r;
+            if (rollZone)
+                r = (frac >= 0.5 - 1.0e-9 || (s.fillBar && beatIdx >= bpb - 1.0 - 1.0e-9)) ? 4 : 2; // accelerating roll
+            else
+                r = hash01 (seed, (juce::uint32) j, 4) < 0.65f ? 2 : 4;
             const int maxR = (int) std::floor (S / 0.0625 + 1.0e-6); // no retrigger shorter than 1/64 note
             if (r > maxR)
                 r = maxR >= 2 ? 2 : 1;
             d.ratchet = r;
         }
 
-        if (hash01 (s.seedRev, (juce::uint32) j, 6) < s.reverse * w)
+        if (hash01 (s.seedRev, (juce::uint32) j, 6) < s.reverse * wRev)
             d.rev = true;
     }
 

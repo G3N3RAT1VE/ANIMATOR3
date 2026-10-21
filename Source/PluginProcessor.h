@@ -4,6 +4,8 @@
 #include <juce_dsp/juce_dsp.h>
 #include "SharedBus.h"
 #include "StemEngine.h"
+#include "Autopilot.h"
+#include "Limiter.h"
 
 namespace riq
 {
@@ -20,7 +22,8 @@ namespace ID
                               iqEvolve = "iqEvolve", iqReverse = "iqReverse", scene = "scene",
                               apPhrase = "apPhrase", apFill = "apFill", apMotion = "apMotion", apRatchet = "apRatchet",
                               apEvolveEvery = "apEvolveEvery", apEvolveChance = "apEvolveChance",
-                              apRevDepth = "apRevDepth", apDrop = "apDrop";
+                              apRevDepth = "apRevDepth", apDrop = "apDrop",
+                              style = "style", limCeiling = "limCeiling", limDrive = "limDrive", limRelease = "limRelease";
 
     inline juce::String stem (int s, const char* name) { return "s" + juce::String (s + 1) + "_" + name; }
 }
@@ -32,8 +35,8 @@ inline const char* const kSceneStemParams[kSceneParamsPerStem] =
 } // namespace riq
 
 // One class, two plug-ins:
-//  - engine (instrument, "RiQ Live"): 3 stem engines, outputs Mix + Stem 1..3
-//  - send   (effect, "RiQ Live Send"): streams its track into bus slot A/B/C
+//  - engine (instrument, "AUTOPILOT"): 3 stem engines, outputs Mix + Stem 1..3
+//  - send   (effect, "AUTOPILOT Send"): streams its track into bus slot A/B/C
 class RiqLiveProcessor : public juce::AudioProcessor
 {
 public:
@@ -50,7 +53,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return sendMode ? "RiQ Live Send" : "RiQ Live"; }
+    const juce::String getName() const override { return sendMode ? "AUTOPILOT Send" : "AUTOPILOT"; }
     bool acceptsMidi() const override { return ! sendMode; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -93,6 +96,23 @@ public:
     std::atomic<float> effArrange[riq::kNumStems] {}, effReverse[riq::kNumStems] {}, effRatchet[riq::kNumStems] {};
     std::atomic<int> dropped[riq::kNumStems] {}, evolveCount[riq::kNumStems] {};
     std::atomic<int> phrasePos { 0 }, phraseLen { 8 };
+    std::atomic<juce::int64> currentBar { 0 };
+
+    // Output loudness (Mix bus, after the limiter) and limiter activity.
+    std::atomic<float> mixLufs { -70.0f }, mixPeakDb { -60.0f }, limiterGrDb { 0.0f };
+
+    // Autopilot inputs from the current parameter values (also used by the phrase map).
+    riq::AutopilotInput makeAutopilotInput() const;
+
+    // ---- presets: whole plugin state (parameters, scenes, variations) as files ----
+    static juce::File getPresetFolder();
+    static juce::StringArray getPresetNames();
+    bool savePreset (const juce::String& name);
+    bool loadPreset (const juce::String& name);
+    bool deletePreset (const juce::String& name);
+    bool renamePreset (const juce::String& from, const juce::String& to);
+    void loadInitPreset();
+    juce::String getCurrentPresetName() const;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout (bool sendMode);
@@ -106,6 +126,8 @@ private:
     };
 
     void processSend (juce::AudioBuffer<float>&, bool playing, juce::int64 t);
+    std::unique_ptr<juce::XmlElement> createStateXml();
+    void applyStateXml (const juce::XmlElement& xml);
     static bool readSlot (int slot, juce::int64 t, float* l, float* r, float* tmpL, float* tmpR, int n);
     void applyScene (int index);
     void handleMidi (const juce::MidiBuffer& midi);
@@ -126,6 +148,8 @@ private:
     std::array<bool, riq::kNumStems * 2> lastEvolve {};
 
     juce::int64 lastIqBar = std::numeric_limits<juce::int64>::min();
+    juce::int64 hostBarPrev = std::numeric_limits<juce::int64>::min();
+    juce::int64 apBar = 0; // bars actually played (keeps counting through host loops)
 
     juce::uint32 heldFill = 0;
     double fillStartSlot = 0.0;
@@ -146,7 +170,10 @@ private:
 
     juce::AudioBuffer<float> srcBuf, tmpBuf, mixBuf;
     std::array<juce::AudioBuffer<float>, riq::kNumStems> stemBufs;
-    juce::dsp::Limiter<float> limiter;
+    std::array<riq::TruePeakLimiter, riq::kNumStems + 1> limiters; // [0] Mix, [1..3] stem outs
+    riq::LoudnessMeter loudness;
+    juce::String presetName;
+    mutable juce::CriticalSection presetLock;
     juce::SmoothedValue<float> masterGain;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RiqLiveProcessor)

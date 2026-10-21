@@ -66,7 +66,9 @@ struct SliceDecision
     }
 };
 
-enum class Protect { off = 0, downbeat, oneAndThree, allBeats };
+// Order matches the parameter choices (new entries are only ever appended).
+enum class Protect { off = 0, downbeat, oneAndThree, allBeats, twoAndFour, offBeats };
+enum class GridStyle { classic = 0, hitech };
 enum class CaptureState { live = 0, armed, frozen };
 
 struct StemSettings
@@ -75,6 +77,8 @@ struct StemSettings
     double sliceBeats = 0.25;
     double beatsPerBar = 4.0;
     Protect protect = Protect::oneAndThree;
+    GridStyle style = GridStyle::hitech;
+    bool fillBar = false; // Beat Assistant: this bar ends a phrase
     float arrange = 0.0f, ratchet = 0.0f, reverse = 0.0f, silence = 0.0f;
     juce::uint32 seed = 1;    // arrange / ratchet variation
     juce::uint32 seedRev = 2; // reverse variation

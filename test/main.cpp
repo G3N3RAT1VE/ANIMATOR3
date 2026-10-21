@@ -1,6 +1,7 @@
 // Offline sanity test: one SEND instance + one ENGINE instance driven by a fake host transport.
 #include "../Source/PluginProcessor.h"
 #include <iostream>
+#include <set>
 
 namespace
 {
@@ -12,13 +13,15 @@ struct FakeHead : juce::AudioPlayHead
 {
     juce::int64 t = 0;
     int wobble = 0; // host position jitter in samples
+    juce::int64 loopLen = 0; // host loop length in samples (0 = no loop)
+    juce::int64 pos() const { return (loopLen > 0 ? t % loopLen : t) + wobble; }
     juce::Optional<PositionInfo> getPosition() const override
     {
         PositionInfo p;
         p.setIsPlaying (true);
         p.setBpm (kBpm);
-        p.setTimeInSamples (t + wobble);
-        p.setPpqPosition ((double) (t + wobble) / kSpb);
+        p.setTimeInSamples (pos());
+        p.setPpqPosition ((double) pos() / kSpb);
         p.setTimeSignature (juce::AudioPlayHead::TimeSignature { 4, 4 });
         return p;
     }
@@ -224,7 +227,7 @@ int main()
 
     // Ratchet must only ever subdivide by 2 or 4 (no triplets), across many variations.
     bool noTriplets = true;
-    int ratchets = 0;
+    int ratchets = 0, ratchetsLastBeat = 0, ratchetsLastTwo = 0, ratchetsGroove = 0;
     for (int evo = 0; evo < 100; ++evo)
     {
         setParam (engine, "s1_evolveArr", 1.0f);
@@ -232,15 +235,26 @@ int main()
         setParam (engine, "s1_evolveArr", 0.0f);
         run (0.25);
         auto& st = engine.getStem (0);
+        const double sl = st.dispSlice.load();
         for (int j = 0; j < st.dispSlices.load(); ++j)
         {
             const auto d = riq::SliceDecision::unpack (st.sliceInfo[(size_t) j].load());
             ratchets += d.ratchet > 1 ? 1 : 0;
             noTriplets = noTriplets && (d.ratchet == 1 || d.ratchet == 2 || d.ratchet == 4);
+            if (d.ratchet > 1)
+            {
+                const int beatInBar = (int) std::floor (std::fmod (j * sl, 4.0) + 1.0e-9);
+                ratchetsLastBeat += beatInBar == 3 ? 1 : 0;
+                ratchetsLastTwo += beatInBar >= 2 ? 1 : 0;
+                ratchetsGroove += std::fmod (j * sl, 4.0) < 1.5 - 1.0e-9 ? 1 : 0; // beat 1 + first half of beat 2
+            }
         }
     }
-    std::cout << "  ratcheted slices seen " << ratchets << "\n";
+    std::cout << "  ratcheted slices seen " << ratchets << ", on beat 4: " << ratchetsLastBeat
+              << ", on beats 3-4: " << ratchetsLastTwo << ", in the groove zone: " << ratchetsGroove << "\n";
     check (noTriplets && ratchets > 100, "ratchet uses only x2 / x4, never triplets");
+    check (ratchetsLastBeat >= ratchets / 2 && ratchetsGroove <= ratchets / 10,
+           "hitech style puts the rolls at the end of the bar");
 
     // 3) Freeze (quantised to loop) then silence the input: frozen loop must keep playing.
     setParam (engine, "s1_ratchet", 0.0f);
@@ -295,6 +309,108 @@ int main()
     }
     check (mixPeak < 1.0e-6, "Out=Own removes the stem from the Mix bus");
     check (ownErr < 1.0e-4, "Out=Own plays the stem sample-exact on its own bus");
+
+    // 5b) True-peak limiter: driven hard it must hold the ceiling, quiet audio must pass bit-exact.
+    {
+        auto truePeak = [] (const std::vector<float>& v, size_t from, size_t to)
+        {
+            // 8x oversampled peak with a long windowed sinc (reference, independent of the limiter's own estimator)
+            double pk = 0.0;
+            constexpr int H = 32, OS = 8;
+            for (size_t i = from + H; i + H < to; ++i)
+            {
+                pk = juce::jmax (pk, (double) std::abs (v[i]));
+                for (int p = 1; p < OS; ++p)
+                {
+                    const double f = (double) p / OS;
+                    double y = 0.0;
+                    for (int k = -H + 1; k <= H; ++k)
+                    {
+                        const double x = k - f;
+                        const double s = std::sin (juce::MathConstants<double>::pi * x) / (juce::MathConstants<double>::pi * x);
+                        const double w = 0.5 * (1.0 + std::cos (juce::MathConstants<double>::pi * x / (H + 0.5)));
+                        y += v[i + (size_t) k] * s * w;
+                    }
+                    pk = juce::jmax (pk, std::abs (y));
+                }
+            }
+            return 20.0 * std::log10 (pk + 1.0e-12);
+        };
+
+        setParam (engine, "s1_out", 0.0f); // back on the Mix
+        setParam (engine, "limiter", 1.0f);
+        setParam (engine, "limCeiling", 0.0f);
+        setParam (engine, "limDrive", 18.0f);
+        run (1.0);
+        const auto limFrom = outLog.size();
+        run (8.0);
+        double samplePeak = 0.0;
+        for (auto s = limFrom; s < outLog.size(); ++s)
+            samplePeak = juce::jmax (samplePeak, (double) std::abs (outLog[s]));
+        const double tpDb = truePeak (outLog, limFrom, outLog.size());
+        std::cout << "  limiter +18 dB drive: sample peak " << 20.0 * std::log10 (samplePeak) << " dB, true peak " << tpDb << " dBTP\n";
+        check (samplePeak <= 1.0 && tpDb <= 0.15, "limiter holds 0 dBTP with +18 dB drive");
+
+        setParam (engine, "limDrive", 0.0f);
+        run (2.0);
+        const auto quietFrom = outLog.size();
+        run (4.0);
+        double quietErr = 0.0;
+        for (auto s = quietFrom; s < outLog.size(); ++s)
+            quietErr = juce::jmax (quietErr, (double) std::abs (outLog[s] - source ((juce::int64) s - D)));
+        std::cout << "  limiter quiet max error " << quietErr << "\n";
+        check (quietErr == 0.0, "limiter passes audio under the ceiling bit-exact");
+        setParam (engine, "limiter", 0.0f);
+    }
+
+    // 5c) Presets: save, change, load, rename, delete.
+    {
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("autopilot_preset_test");
+        dir.deleteRecursively();
+        _putenv_s ("AUTOPILOT_PRESET_DIR", dir.getFullPathName().toRawUTF8());
+        setParam (engine, "s2_gain", -6.0f);
+        const bool saved = engine.savePreset ("Test Preset");
+        setParam (engine, "s2_gain", 0.0f);
+        const bool loaded = engine.loadPreset ("Test Preset");
+        const float g = engine.apvts.getRawParameterValue ("s2_gain")->load();
+        const bool renamed = engine.renamePreset ("Test Preset", "Renamed");
+        const auto names = RiqLiveProcessor::getPresetNames();
+        const bool deleted = engine.deletePreset ("Renamed");
+        check (saved && loaded && std::abs (g + 6.0f) < 1.0e-3 && renamed && names.contains ("Renamed")
+                   && deleted && RiqLiveProcessor::getPresetNames().isEmpty() && engine.getCurrentPresetName().isEmpty(),
+               "presets save / load / rename / delete");
+        dir.deleteRecursively();
+        setParam (engine, "s2_gain", 0.0f);
+    }
+
+    // 5d) Host loops 2 bars: the autopilot phrase must still run through all 8 bars,
+    //     and IQ Evolve (every 4 bars, chance 100%) must fire every 4 played bars.
+    {
+        setParam (engine, "iqArrange", 0.5f);
+        setParam (engine, "iqEvolve", 1.0f);
+        setParam (engine, "apPhrase", 1.0f);       // 8 bars
+        setParam (engine, "apEvolveEvery", 2.0f);  // every 4 bars
+        setParam (engine, "apEvolveChance", 1.0f);
+        const auto evolveBefore = engine.evolveCount[0].load();
+        head.loopLen = (juce::int64) (8 * kSpb);   // 2 bars of 4/4
+        int maxPos = 0;
+        std::set<int> seen;
+        for (int b = 0; b < (int) (64 * kSpb / kBlock); ++b) // 16 played bars
+        {
+            run (kBlock / kSpb);
+            maxPos = juce::jmax (maxPos, engine.phrasePos.load());
+            seen.insert (engine.phrasePos.load());
+        }
+        head.loopLen = 0;
+        const auto evolves = engine.evolveCount[0].load() - evolveBefore;
+        std::cout << "  host loop 2 bars: phrase positions seen " << seen.size() << ", max " << maxPos + 1
+                  << ", evolves in 16 bars " << evolves << "\n";
+        check (seen.size() == 8 && maxPos == 7, "autopilot phrase runs all 8 bars inside a 2-bar host loop");
+        check (evolves >= 3 && evolves <= 5, "IQ Evolve every 4 bars keeps firing inside a host loop");
+        setParam (engine, "iqArrange", 0.0f);
+        setParam (engine, "iqEvolve", 0.0f);
+        run (1.0);
+    }
 
     // 6) Autopilot running for 32 bars: output keeps flowing and stays finite.
     setParam (engine, "s1_out", 0.0f);
