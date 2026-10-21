@@ -469,7 +469,7 @@ StemColumn::StemColumn (RiqLiveProcessor& p, int s)
 
     hold.setTooltip ("Hold: repeats the currently playing slice (Rhythmiq Freeze).");
     capture.setTooltip ("IN: the track streams live into the buffer. Click to FREEZE the buffer contents (quantised by Freeze Q).");
-    ratchet.slider.setTooltip ("Subdivides weak-beat slices into 2/3/4 retriggers.");
+    ratchet.slider.setTooltip ("Subdivides weak-beat slices into 2 or 4 retriggers (no triplets).");
     out.setTooltip ("Mix: stem plays on the main output. Own: only on its own output (Stem " + juce::String (s + 1) + ").");
 
     // Like Rhythmiq: touching a stem knob hands control back from the Beat Assistant.

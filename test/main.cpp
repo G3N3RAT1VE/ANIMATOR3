@@ -222,6 +222,26 @@ int main()
     check (strongClean, "slices on beats 1 and 3 are protected");
     check (changedWeak >= 4, "weak-beat slices get retriggered");
 
+    // Ratchet must only ever subdivide by 2 or 4 (no triplets), across many variations.
+    bool noTriplets = true;
+    int ratchets = 0;
+    for (int evo = 0; evo < 100; ++evo)
+    {
+        setParam (engine, "s1_evolveArr", 1.0f);
+        run (0.25);
+        setParam (engine, "s1_evolveArr", 0.0f);
+        run (0.25);
+        auto& st = engine.getStem (0);
+        for (int j = 0; j < st.dispSlices.load(); ++j)
+        {
+            const auto d = riq::SliceDecision::unpack (st.sliceInfo[(size_t) j].load());
+            ratchets += d.ratchet > 1 ? 1 : 0;
+            noTriplets = noTriplets && (d.ratchet == 1 || d.ratchet == 2 || d.ratchet == 4);
+        }
+    }
+    std::cout << "  ratcheted slices seen " << ratchets << "\n";
+    check (noTriplets && ratchets > 100, "ratchet uses only x2 / x4, never triplets");
+
     // 3) Freeze (quantised to loop) then silence the input: frozen loop must keep playing.
     setParam (engine, "s1_ratchet", 0.0f);
     setParam (engine, "s1_arrange", 0.0f);

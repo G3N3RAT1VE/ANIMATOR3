@@ -215,7 +215,7 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
         if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * w)
         {
             const float u = hash01 (seed, (juce::uint32) j, 4);
-            int r = u < 0.55f ? 2 : (u < 0.8f ? 4 : 3);
+            int r = u < 0.65f ? 2 : 4; // straight subdivisions only, no triplets
             const int maxR = (int) std::floor (S / 0.0625 + 1.0e-6); // no retrigger shorter than 1/64 note
             if (r > maxR)
                 r = maxR >= 2 ? 2 : 1;

@@ -28,7 +28,7 @@ Untouched slices are bit-exact copies of the input (verified by the offline test
 - **Slice size** 1/4 · 1/8 · 1/16 · 1/32
 - **FREEZE** (hold) — repeats the currently playing slice (Rhythmiq's Freeze)
 - **ARRANGE** — chance a slice is replaced / repeated (loops the previous slice or jumps to the same position in another beat)
-- **REVERSE**, **SILENCE** (drops the lowest-energy slices), **RATCHET** (subdivides a slice into 2/3/4 retriggers)
+- **REVERSE**, **SILENCE** (drops the lowest-energy slices), **RATCHET** (subdivides a slice into 2 or 4 retriggers, no triplets)
 - **EVOLVE** under Arrange and under Reverse — new variation for that knob
 - **ON / SOLO / PAN / GAIN / OUT (Mix|Own)**
 
