@@ -412,6 +412,54 @@ int main()
         run (1.0);
     }
 
+    // 5e) Generative drift: no canned patterns, the walk never repeats, rate and depth respected.
+    {
+        riq::AutopilotInput in;
+        in.iq = 0.5f;
+        in.phraseBars = 8;
+        in.build = 0.0f;
+        in.fill = 0.0f;
+        in.seed = 1234;
+
+        in.drift = 0.0f;
+        bool still = true;
+        for (int b = 0; b < 32; ++b)
+            still = still && std::abs (riq::planAutopilot (in, b + 0.3).stems[0].arrange - 0.3f) < 1.0e-4f;
+        check (still, "drift 0: parameters stay where they are set");
+
+        in.drift = 0.8f;
+        in.smooth = false;
+        in.rateBars = 2.0;
+        bool stepped = true;
+        for (int b = 0; b < 32; ++b)
+            stepped = stepped && riq::planAutopilot (in, b + 0.1).stems[0].arrange == riq::planAutopilot (in, b + 0.9).stems[0].arrange;
+        check (stepped, "SMOOTH off: values hold within the drift interval");
+
+        in.smooth = true;
+        std::set<int> steps;
+        juce::String first8, second8;
+        bool independent = false;
+        for (int b = 0; b < 64; ++b)
+        {
+            const auto plan = riq::planAutopilot (in, b + 0.5);
+            const int st = riq::knobStep (plan.stems[0].arrange);
+            steps.insert (st);
+            if (b < 8) first8 << st << ",";
+            else if (b < 16) second8 << st << ",";
+            independent = independent || std::abs (plan.stems[0].arrange - plan.stems[1].arrange) > 0.15f;
+        }
+        std::cout << "  drift: " << steps.size() << " different arrange steps (patterns) in 64 bars\n";
+        check (steps.size() >= 6 && first8 != second8, "drift walks through many patterns and does not repeat per phrase");
+        check (independent, "each stem drifts on its own walk");
+
+        in.drift = 1.0f;
+        in.driftSlice = true;
+        int hops = 0;
+        for (int b = 0; b < 64; ++b)
+            hops += riq::planAutopilot (in, b + 0.5).stems[0].sliceShift != 0 ? 1 : 0;
+        check (hops > 0 && hops < 64, "slice drift hops to another grid now and then");
+    }
+
     // 6) Autopilot running for 32 bars: output keeps flowing and stays finite.
     setParam (engine, "s1_out", 0.0f);
     setParam (engine, "iqArrange", 0.8f);

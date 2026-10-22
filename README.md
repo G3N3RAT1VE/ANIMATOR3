@@ -27,7 +27,20 @@ Two VST3 plug-ins built from one codebase (installed to `C:\Program Files\Common
 - **AUTOPILOT deck**: IQ ARRANGE / IQ EVOLVE / IQ REVERSE, LINK A B C, the **phrase map** (plan for the
   whole phrase: brightness = arrange, magenta = ratchet, arrow = reverse, dot = evolve, red cross = drop,
   lime frame = current bar), live meters of what each stem uses right now, and the autopilot settings:
-  Phrase 4/8/16, Evolve every 1-16 bars, Fill, Motion, Fill Ratchet, Evolve %, Rev Depth, Drop.
+  Phrase 4/8/16, Evolve every 1-16 bars, Drift rate 1/2-16 bars, Smooth, drift targets (RAT / REV / SIL / SLICE),
+  Drift, Build, Fill, Ratchet, Evolve %, Rev Depth, Drop.
+
+### How the autopilot works (generative)
+- Like Rhythmiq's Beat Assistant, **IQ takes over the stem knobs and moves them over time**, and every step of
+  the Arrange / Reverse knobs (17 steps) has **its own pattern** - so a drifting knob walks through different
+  patterns, not just more or fewer edits. Evolve (button or IQ Evolve) re-rolls the pattern of the step that is
+  playing, and the step remembers it.
+- **Drift**: IQ and each linked stem's Arrange / Ratchet / Reverse (optionally Silence and slice size) follow
+  smoothed random walks - each stem its own, never repeating. **Rate** sets the bars between new targets,
+  **Smooth** glides between them (off = jumps on the grid). The phrase map draws the walk; the IQ knob's magenta
+  ring shows where IQ is right now.
+- **Build / Fill** raise the centre of the walk across the phrase and in its last bar; **Drop** lets a stem sit out a bar.
+
 - **Master strip**: loop length 1/2/4 bars, fill-key slice size, Freeze Q (Off/Beat/Bar/Loop/1/8/1/16),
   Scene Q (Off/Beat/Bar/2/4/8/16 bars), summed waveform, fill keys.
 - **Stem lanes A / B / C**: source, KEEP (per stem, or Global), slice 1/4-1/32, **IN / FROZEN**,

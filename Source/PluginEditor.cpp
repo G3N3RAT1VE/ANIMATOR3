@@ -486,6 +486,7 @@ void PhraseMap::paint (juce::Graphics& g)
                     juce::Justification::centred);
     }
 
+    // bar cells: brightness = arrange at the middle of the bar, crossed = dropped, dot = evolve
     for (int b = 0; b < pb; ++b)
     {
         const auto plan = planAutopilotBar (in, start + b);
@@ -493,13 +494,13 @@ void PhraseMap::paint (juce::Graphics& g)
 
         g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         g.setColour (plan.fillBar || plan.halfFillBar ? Colours::edit : Colours::dim);
-        g.drawText (plan.fillBar ? "FILL" : plan.halfFillBar ? "fill" : juce::String (b + 1),
+        g.drawText (plan.fillBar ? "END" : juce::String (b + 1),
                     juce::Rectangle<float> (x, header.getY(), cw, header.getHeight()), juce::Justification::centred);
 
         for (int s = 0; s < 3; ++s)
         {
             const auto& st = plan.stems[(size_t) s];
-            const auto cell = juce::Rectangle<float> (x, r.getY() + s * rh, cw, rh).reduced (1.5f);
+            const auto cell = juce::Rectangle<float> (x, r.getY() + s * rh, cw, rh).reduced (1.0f);
             if (st.drop)
             {
                 g.setColour (Colours::bg);
@@ -508,20 +509,13 @@ void PhraseMap::paint (juce::Graphics& g)
                 g.drawLine (cell.getX(), cell.getBottom(), cell.getRight(), cell.getY(), 1.2f);
                 continue;
             }
-            g.setColour (Colours::stem[s].withAlpha (0.08f + 0.82f * st.arrange));
+            g.setColour (Colours::stem[s].withAlpha (0.06f + 0.3f * st.arrange));
             g.fillRect (cell);
-            if (st.ratchet > 0.02f)
+            if (st.sliceShift != 0)
             {
-                g.setColour (Colours::edit);
-                g.fillRect (cell.withTop (cell.getBottom() - juce::jmax (2.0f, cell.getHeight() * 0.5f * st.ratchet)));
-            }
-            if (st.reverse > 0.15f)
-            {
-                juce::Path tri;
-                const float ty = cell.getCentreY();
-                tri.addTriangle (cell.getX() + 3.0f, ty, cell.getX() + 8.0f, ty - 4.0f, cell.getX() + 8.0f, ty + 4.0f);
-                g.setColour (Colours::text.withAlpha (juce::jmin (1.0f, st.reverse * 1.5f)));
-                g.fillPath (tri);
+                g.setColour (Colours::text);
+                g.setFont (juce::FontOptions (9.0f, juce::Font::bold));
+                g.drawText (st.sliceShift > 0 ? "FINE" : "WIDE", cell.reduced (3.0f, 1.0f), juce::Justification::bottomRight);
             }
             if (st.evolve)
             {
@@ -529,13 +523,40 @@ void PhraseMap::paint (juce::Graphics& g)
                 g.fillEllipse (cell.getRight() - 7.0f, cell.getY() + 2.0f, 5.0f, 5.0f);
             }
         }
+    }
 
-        if (playing && b == pos)
+    // drift curves across the phrase: arrange (stem colour) and ratchet (magenta), sampled finely
+    const int steps = juce::jmax (8, (int) r.getWidth() / 3);
+    std::array<juce::Path, 3> arr, rat;
+    for (int i = 0; i <= steps; ++i)
+    {
+        const double barPos = (double) start + (double) pb * i / steps;
+        const auto plan = planAutopilot (in, barPos);
+        const float x = r.getX() + r.getWidth() * (float) i / (float) steps;
+        for (int s = 0; s < 3; ++s)
         {
-            juce::Path outline;
-            outline.addRectangle (juce::Rectangle<float> (x + 0.5f, r.getY(), cw - 1.0f, r.getHeight()));
-            glowStroke (g, outline, Colours::accent, 1.5f);
+            const float top = r.getY() + s * rh + 3.0f, h = rh - 6.0f;
+            const float ya = top + h * (1.0f - plan.stems[(size_t) s].arrange);
+            const float yr = top + h * (1.0f - plan.stems[(size_t) s].ratchet);
+            if (i == 0) { arr[(size_t) s].startNewSubPath (x, ya); rat[(size_t) s].startNewSubPath (x, yr); }
+            else        { arr[(size_t) s].lineTo (x, ya);          rat[(size_t) s].lineTo (x, yr); }
         }
+    }
+    for (int s = 0; s < 3; ++s)
+    {
+        if (! in.linked[(size_t) s])
+            continue;
+        g.setColour (Colours::edit.withAlpha (0.7f));
+        g.strokePath (rat[(size_t) s], juce::PathStrokeType (1.2f));
+        glowStroke (g, arr[(size_t) s], Colours::stem[s], 1.4f);
+    }
+
+    if (playing)
+    {
+        const float x = r.getX() + cw * (float) pos;
+        juce::Path outline;
+        outline.addRectangle (juce::Rectangle<float> (x + 0.5f, r.getY(), cw - 1.0f, r.getHeight()));
+        glowStroke (g, outline, Colours::accent, 1.5f);
     }
 }
 
@@ -546,17 +567,24 @@ AutopilotDeck::AutopilotDeck (RiqLiveProcessor& p)
       iqEvolve (p.apvts, ID::iqEvolve, "IQ EVOLVE", Colours::accent),
       iqReverse (p.apvts, ID::iqReverse, "IQ REVERSE", Colours::accent),
       phraseMap (p),
-      apPhrase (p.apvts, ID::apPhrase), apEvolveEvery (p.apvts, ID::apEvolveEvery),
+      apPhrase (p.apvts, ID::apPhrase), apEvolveEvery (p.apvts, ID::apEvolveEvery), apRate (p.apvts, ID::apRate),
+      apSmooth (p.apvts, ID::apSmooth, "SMOOTH", Colours::accent),
+      driftRat (p.apvts, ID::apDriftRat, "RAT", Colours::edit),
+      driftRev (p.apvts, ID::apDriftRev, "REV", Colours::text),
+      driftSil (p.apvts, ID::apDriftSil, "SIL", Colours::dim),
+      driftSlice (p.apvts, ID::apDriftSlice, "SLICE", Colours::frozen),
+      apDrift (p.apvts, ID::apDrift, "DRIFT", Colours::accent),
+      apBuild (p.apvts, ID::apBuild, "BUILD", Colours::accent),
       apFill (p.apvts, ID::apFill, "FILL", Colours::accent),
-      apMotion (p.apvts, ID::apMotion, "MOTION", Colours::accent),
-      apRatchet (p.apvts, ID::apRatchet, "FILL RATCHET", Colours::edit),
+      apRatchet (p.apvts, ID::apRatchet, "RATCHET", Colours::edit),
       apEvolveChance (p.apvts, ID::apEvolveChance, "EVOLVE %", Colours::accent),
-      apRevDepth (p.apvts, ID::apRevDepth, "REV DEPTH", Colours::accent),
+      apRevDepth (p.apvts, ID::apRevDepth, "REV DEPTH", Colours::text),
       apDrop (p.apvts, ID::apDrop, "DROP", Colours::warn)
 {
     for (juce::Component* c : std::initializer_list<juce::Component*> {
-             &iqArrange, &iqEvolve, &iqReverse, &phraseMap, &apPhrase, &apEvolveEvery,
-             &apFill, &apMotion, &apRatchet, &apEvolveChance, &apRevDepth, &apDrop })
+             &iqArrange, &iqEvolve, &iqReverse, &phraseMap, &apPhrase, &apEvolveEvery, &apRate, &apSmooth,
+             &driftRat, &driftRev, &driftSil, &driftSlice, &apDrift, &apBuild, &apFill, &apRatchet,
+             &apEvolveChance, &apRevDepth, &apDrop })
         addAndMakeVisible (c);
 
     for (int s = 0; s < kNumStems; ++s)
@@ -566,12 +594,23 @@ AutopilotDeck::AutopilotDeck (RiqLiveProcessor& p)
         addAndMakeVisible (*links[(size_t) s]);
     }
 
-    iqArrange.slider.setTooltip ("Autopilot drives the Arrange/Ratchet of linked stems: motion every bar, fills at phrase ends");
-    iqEvolve.setTooltip ("Autopilot presses the stem Evolve buttons at the bars set by EVERY / EVOLVE %");
-    iqReverse.setTooltip ("Autopilot reverses slices of linked stems on alternating bars");
+    iqArrange.slider.setTooltip ("IQ: centre of the generative walk. The magenta ring shows where IQ has drifted right now. "
+                                 "Every knob step has its own pattern, so drifting walks through different patterns");
+    iqEvolve.setTooltip ("Re-rolls the pattern of the knob step that is playing, at the bars set by EVERY / EVOLVE %");
+    iqReverse.setTooltip ("Autopilot drives Reverse of linked stems (drifts if REV is on)");
+    apDrift.slider.setTooltip ("How far IQ and the stem parameters wander from where they are set");
+    apRate.setTooltip ("Drift rate: bars between new targets of the walk");
+    apSmooth.setTooltip ("On: values glide between targets. Off: they jump on the grid");
+    driftRat.setTooltip ("Ratchet drifts");
+    driftRev.setTooltip ("Reverse drifts (with IQ REVERSE on)");
+    driftSil.setTooltip ("Silence drifts (gaps come and go)");
+    driftSlice.setTooltip ("Slice size hops to a finer / wider grid now and then");
+    apBuild.slider.setTooltip ("The walk's centre rises across the phrase");
+    apFill.slider.setTooltip ("Extra push in the last bar of the phrase (and a little at half way)");
+    apRatchet.slider.setTooltip ("How much ratchet the autopilot adds");
     apDrop.slider.setTooltip ("Chance that a linked stem sits out a bar (one always keeps playing)");
-    phraseMap.setTooltip ("Plan for this phrase: brightness = arrange, magenta = ratchet, arrow = reverse, "
-                          "dot = evolve, red cross = stem dropped. Lime frame = now.");
+    phraseMap.setTooltip ("Generative plan for this phrase: lines = drifting arrange (stem colour) and ratchet (magenta), "
+                          "dot = evolve, FINE / WIDE = slice hop, red cross = dropped. Lime frame = now.");
 }
 
 void AutopilotDeck::resized()
@@ -587,17 +626,27 @@ void AutopilotDeck::resized()
         links[(size_t) s]->setBounds (left.getX() + 56 + s * 44, left.getBottom() - 30, 38, 26);
 
     r.removeFromLeft (14);
-    auto right = r.removeFromRight (380);
-    auto selRow = right.removeFromTop (38);
-    apPhrase.setBounds (selRow.removeFromLeft (176).withTrimmedTop (14));
-    selRow.removeFromLeft (14);
-    apEvolveEvery.setBounds (selRow.withTrimmedTop (14));
-    right.removeFromTop (6);
-    const int kw = right.getWidth() / 3, kh = right.getHeight() / 2;
-    int i = 0;
-    for (auto* k : { &apFill, &apMotion, &apRatchet, &apEvolveChance, &apRevDepth, &apDrop })
+    auto right = r.removeFromRight (460);
+    auto row1 = right.removeFromTop (36);
+    apPhrase.setBounds (row1.removeFromLeft (190).withTrimmedTop (14));
+    row1.removeFromLeft (14);
+    apEvolveEvery.setBounds (row1.withTrimmedTop (14));
+    auto row2 = right.removeFromTop (36).withTrimmedTop (14);
+    apRate.setBounds (row2.removeFromLeft (190));
+    row2.removeFromLeft (6);
+    apSmooth.setBounds (row2.removeFromLeft (66));
+    row2.removeFromLeft (10);
+    for (auto* t : { &driftRat, &driftRev, &driftSil, &driftSlice })
     {
-        k->setBounds (right.getX() + (i % 3) * kw, right.getY() + (i / 3) * kh, kw, kh);
+        t->setBounds (row2.removeFromLeft (t == &driftSlice ? 52 : 42));
+        row2.removeFromLeft (4);
+    }
+    right.removeFromTop (4);
+    const int kw = right.getWidth() / 4, kh = right.getHeight() / 2;
+    int i = 0;
+    for (auto* k : { &apDrift, &apBuild, &apFill, &apRatchet, &apEvolveChance, &apRevDepth, &apDrop })
+    {
+        k->setBounds (right.getX() + (i % 4) * kw, right.getY() + (i / 4) * kh, kw, kh);
         ++i;
     }
 
@@ -629,15 +678,16 @@ void AutopilotDeck::paint (juce::Graphics& g)
     g.setColour (engaged ? Colours::live : Colours::dim);
     g.drawText (engaged ? "ENGAGED" : "STANDBY", 132, 8, 90, 18, juce::Justification::centredLeft);
 
-    const int toFill = (pb - 1 - pos + pb) % pb;
     g.setColour (Colours::text);
-    g.drawText ("BAR " + juce::String (pos + 1) + "/" + juce::String (pb)
-                    + (toFill == 0 ? "   >> FILL NOW" : "   FILL IN " + juce::String (toFill)),
-                phraseMap.getX(), 8, 300, 18, juce::Justification::centredLeft);
+    g.drawText ("BAR " + juce::String (pos + 1) + "/" + juce::String (pb) + "   IQ NOW "
+                    + juce::String (juce::roundToInt (proc.iqNow.load() * 100.0f)) + "%",
+                phraseMap.getX(), 8, 320, 18, juce::Justification::centredLeft);
 
     caption (g, "LINK", links[0]->getX() - 40, links[0]->getY() + 7, 36);
     caption (g, "PHRASE", apPhrase.getX(), apPhrase.getY() - 13);
     caption (g, "EVOLVE EVERY (BARS)", apEvolveEvery.getX(), apEvolveEvery.getY() - 13);
+    caption (g, "DRIFT RATE (BARS)", apRate.getX(), apRate.getY() - 13);
+    caption (g, "DRIFTS", driftRat.getX(), driftRat.getY() - 13);
     caption (g, "PHRASE MAP", phraseMap.getX(), phraseMap.getY() - 13);
 
     // live meters: what the stems are using right now
@@ -662,6 +712,14 @@ void AutopilotDeck::paint (juce::Graphics& g)
             g.setColour (proc.dropped[s].load() ? Colours::line : cols[k]);
             g.fillRect (bar.withWidth ((int) (bar.getWidth() * juce::jlimit (0.0f, 1.0f, vals[k]))));
         }
+    }
+
+    // the IQ knob shows where IQ has drifted to
+    const float ghost = proc.apvts.getRawParameterValue (ID::iqArrange)->load() > 0.0f ? proc.iqNow.load() : -1.0f;
+    if ((float) iqArrange.slider.getProperties().getWithDefault ("ghost", -1.0f) != ghost)
+    {
+        iqArrange.slider.getProperties().set ("ghost", ghost);
+        iqArrange.slider.repaint();
     }
 }
 
@@ -1169,7 +1227,7 @@ RiqLiveEditor::RiqLiveEditor (RiqLiveProcessor& p)
                            "Scenes are kept in the Live set and in presets.");
     addAndMakeVisible (saveButton);
 
-    setSize (1320, 936);
+    setSize (1320, 960);
     startTimerHz (30);
 }
 
@@ -1241,10 +1299,10 @@ void RiqLiveEditor::resized()
     right.removeFromRight (2);
     limDrive.setBounds (right.removeFromRight (48));
 
-    deck.setBounds (10, 56, getWidth() - 20, 216);
-    master.setBounds (10, 280, getWidth() - 20, 110);
+    deck.setBounds (10, 56, getWidth() - 20, 240);
+    master.setBounds (10, 304, getWidth() - 20, 110);
 
-    auto lanesArea = juce::Rectangle<int> (10, 398, getWidth() - 20, 3 * 150 + 2 * 6);
+    auto lanesArea = juce::Rectangle<int> (10, 422, getWidth() - 20, 3 * 150 + 2 * 6);
     for (auto& lane : lanes)
     {
         lane->setBounds (lanesArea.removeFromTop (150));

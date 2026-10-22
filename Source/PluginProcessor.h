@@ -13,6 +13,12 @@ namespace riq
 constexpr int kNumStems = 3;
 constexpr int kNumScenes = 9; // 0 = Init, 1..8 user
 constexpr int kSceneParamsPerStem = 9;
+// Like Rhythmiq, every step of the Arrange / Reverse knobs has its own arrangement (seed);
+// Evolve re-rolls the seed of the step that is playing, and the step remembers it.
+constexpr int kSteps = 17; // knob value 0..1 -> step 0..16
+constexpr int kNumSeeds = kSteps * 2 * kNumStems;
+constexpr int seedIndex (int step, int kind, int stem) { return (step * 2 + kind) * kNumStems + stem; }
+inline int knobStep (float v) { return juce::jlimit (0, kSteps - 1, juce::roundToInt (v * (float) (kSteps - 1))); }
 
 namespace ID
 {
@@ -20,9 +26,11 @@ namespace ID
                               freezeQ = "freezeQ", sceneQ = "sceneQ", fillSize = "fillSize", fillNote = "fillNote",
                               masterGain = "masterGain", limiter = "limiter", iqArrange = "iqArrange",
                               iqEvolve = "iqEvolve", iqReverse = "iqReverse", scene = "scene",
-                              apPhrase = "apPhrase", apFill = "apFill", apMotion = "apMotion", apRatchet = "apRatchet",
+                              apPhrase = "apPhrase", apFill = "apFill", apRatchet = "apRatchet",
                               apEvolveEvery = "apEvolveEvery", apEvolveChance = "apEvolveChance",
-                              apRevDepth = "apRevDepth", apDrop = "apDrop",
+                              apRevDepth = "apRevDepth", apDrop = "apDrop", apBuild = "apBuild",
+                              apDrift = "apDrift", apRate = "apRate", apSmooth = "apSmooth", apDriftRat = "apDriftRat",
+                              apDriftRev = "apDriftRev", apDriftSil = "apDriftSil", apDriftSlice = "apDriftSlice",
                               style = "style", limCeiling = "limCeiling", limDrive = "limDrive", limRelease = "limRelease";
 
     inline juce::String stem (int s, const char* name) { return "s" + juce::String (s + 1) + "_" + name; }
@@ -96,6 +104,8 @@ public:
     std::atomic<float> effArrange[riq::kNumStems] {}, effReverse[riq::kNumStems] {}, effRatchet[riq::kNumStems] {};
     std::atomic<int> dropped[riq::kNumStems] {}, evolveCount[riq::kNumStems] {};
     std::atomic<int> phrasePos { 0 }, phraseLen { 8 };
+    std::atomic<int> playingStep[riq::kNumStems * 2] {}; // [kind * 3 + stem]
+    std::atomic<float> iqNow { 0.0f };                    // IQ after drift
     std::atomic<juce::int64> currentBar { 0 };
 
     // Output loudness (Mix bus, after the limiter) and limiter activity.
@@ -122,7 +132,7 @@ private:
     {
         bool valid = false;
         std::array<float, riq::kNumStems * riq::kSceneParamsPerStem> values {};
-        std::array<juce::uint32, riq::kNumStems * 2> seeds {}; // arrange seeds, then reverse seeds
+        std::array<juce::uint32, riq::kNumSeeds> seeds {};
     };
 
     void processSend (juce::AudioBuffer<float>&, bool playing, juce::int64 t);
@@ -143,13 +153,14 @@ private:
     int sceneQueued = -1;
     int lastSceneParam = 0;
 
-    // [0..2] arrange seeds, [3..5] reverse seeds
-    std::array<std::atomic<juce::uint32>, riq::kNumStems * 2> seeds;
+    // per-step pattern memory, see seedIndex()
+    std::array<std::atomic<juce::uint32>, riq::kNumSeeds> seeds;
     std::array<bool, riq::kNumStems * 2> lastEvolve {};
 
     juce::int64 lastIqBar = std::numeric_limits<juce::int64>::min();
     juce::int64 hostBarPrev = std::numeric_limits<juce::int64>::min();
     juce::int64 apBar = 0; // bars actually played (keeps counting through host loops)
+    juce::uint32 driftSeed = 0x5eed; // the autopilot's walk; saved with the state
 
     juce::uint32 heldFill = 0;
     double fillStartSlot = 0.0;

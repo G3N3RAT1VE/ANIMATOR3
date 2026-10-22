@@ -51,12 +51,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
     toggle (ID::iqReverse, "IQ Reverse", false);
     choice (ID::apPhrase, "Autopilot Phrase", { "4 Bars", "8 Bars", "16 Bars" }, 1);
     knob (ID::apFill, "Autopilot Fill", 0.0f, 1.0f, 0.7f);
-    knob (ID::apMotion, "Autopilot Motion", 0.0f, 1.0f, 0.5f);
-    knob (ID::apRatchet, "Autopilot Fill Ratchet", 0.0f, 1.0f, 0.5f);
+    knob (ID::apRatchet, "Autopilot Ratchet", 0.0f, 1.0f, 0.4f);
     choice (ID::apEvolveEvery, "Autopilot Evolve Every", { "1", "2", "4", "8", "16" }, 2);
     knob (ID::apEvolveChance, "Autopilot Evolve Chance", 0.0f, 1.0f, 0.5f);
     knob (ID::apRevDepth, "Autopilot Reverse Depth", 0.0f, 1.0f, 0.3f);
     knob (ID::apDrop, "Autopilot Drop", 0.0f, 1.0f, 0.0f);
+    knob (ID::apBuild, "Autopilot Build", 0.0f, 1.0f, 0.6f);
+    knob (ID::apDrift, "Autopilot Drift", 0.0f, 1.0f, 0.5f);
+    choice (ID::apRate, "Autopilot Drift Rate", { "1/2", "1", "2", "4", "8", "16" }, 2);
+    toggle (ID::apSmooth, "Autopilot Smooth", true);
+    toggle (ID::apDriftRat, "Drift Ratchet", true);
+    toggle (ID::apDriftRev, "Drift Reverse", true);
+    toggle (ID::apDriftSil, "Drift Silence", false);
+    toggle (ID::apDriftSlice, "Drift Slice", false);
     choice (ID::scene, "Scene", { "-", "Init", "1", "2", "3", "4", "5", "6", "7", "8" }, 0);
 
     for (int s = 0; s < kNumStems; ++s)
@@ -108,6 +115,7 @@ RiqLiveProcessor::RiqLiveProcessor (bool isSend)
 {
     for (size_t s = 0; s < seeds.size(); ++s)
         seeds[s].store ((juce::uint32) s * 7919u + 1u);
+    driftSeed = (juce::uint32) juce::Random::getSystemRandom().nextInt() | 1u;
 
     if (sendMode)
         return;
@@ -385,7 +393,11 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     {
         const bool ev = param (ID::stem (k % kNumStems, k < kNumStems ? "evolveArr" : "evolveRev")) > 0.5f;
         if (ev && ! lastEvolve[(size_t) k])
-            seeds[(size_t) k].store (hash32 (seeds[(size_t) k].load(), 77u, (juce::uint32) k) | 1u);
+        {
+            const int s = k % kNumStems, kind = k / kNumStems;
+            const auto idx = (size_t) seedIndex (playingStep[kind * kNumStems + s].load(), kind, s);
+            seeds[idx].store (hash32 (seeds[idx].load(), 77u, (juce::uint32) k) | 1u);
+        }
         lastEvolve[(size_t) k] = ev;
     }
 
@@ -435,7 +447,9 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // ---- Beat Assistant autopilot (same pure function the phrase map draws) ----
     const auto apIn = makeAutopilotInput();
-    const auto plan = planAutopilotBar (apIn, barIdx);
+    const double barFrac = ppqT / bpb - std::floor (ppqT / bpb);
+    const auto plan = planAutopilot (apIn, (double) barIdx + barFrac);
+    iqNow.store (plan.iqNow);
     phrasePos.store (plan.phrasePos);
     phraseLen.store (apIn.phraseBars);
 
@@ -448,9 +462,13 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             {
                 if (! plan.stems[(size_t) s].evolve)
                     continue;
-                for (int k : { s, s + kNumStems })
-                    seeds[(size_t) k].store (hash32 (seeds[(size_t) k].load(), (juce::uint32) barIdx, 33u) | 1u);
+                // Re-roll the pattern of the knob step that is playing (the step remembers it).
                 evolveCount[s].fetch_add (1);
+                for (int kind = 0; kind < 2; ++kind)
+                {
+                    const auto idx = (size_t) seedIndex (playingStep[kind * kNumStems + s].load(), kind, s);
+                    seeds[idx].store (hash32 (seeds[idx].load(), (juce::uint32) barIdx, 33u) | 1u);
+                }
             }
         }
         lastIqBar = barIdx;
@@ -496,7 +514,7 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         const auto& ap = plan.stems[(size_t) s];
         StemSettings st;
         st.loopBeats = loopBeats;
-        st.sliceBeats = kSliceBeats[juce::jlimit (0, 3, (int) param (ID::stem (s, "slice")))];
+        st.sliceBeats = kSliceBeats[juce::jlimit (0, 3, (int) param (ID::stem (s, "slice")) + ap.sliceShift)];
         st.beatsPerBar = bpb;
         const int stemKeep = (int) param (ID::stem (s, "keep"));
         st.protect = (Protect) juce::jlimit (0, 5, stemKeep > 0 ? stemKeep - 1 : globalKeep);
@@ -505,9 +523,12 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         st.arrange = ap.arrange;
         st.ratchet = ap.ratchet;
         st.reverse = ap.reverse;
-        st.silence = param (ID::stem (s, "silence"));
-        st.seed = seeds[(size_t) s].load();
-        st.seedRev = seeds[(size_t) (s + kNumStems)].load();
+        st.silence = ap.silence;
+        const int arrStep = knobStep (ap.arrange), revStep = knobStep (ap.reverse);
+        playingStep[s].store (arrStep);
+        playingStep[kNumStems + s].store (revStep);
+        st.seed = seeds[(size_t) seedIndex (arrStep, 0, s)].load();
+        st.seedRev = seeds[(size_t) seedIndex (revStep, 1, s)].load();
         effArrange[s].store (st.arrange);
         effReverse[s].store (st.reverse);
         effRatchet[s].store (st.ratchet);
@@ -655,6 +676,7 @@ std::unique_ptr<juce::XmlElement> RiqLiveProcessor::createStateXml()
         sd.add (juce::String ((juce::int64) v.load()));
     state.setProperty ("seeds", sd.joinIntoString (","), nullptr);
     state.setProperty ("presetName", getCurrentPresetName(), nullptr);
+    state.setProperty ("driftSeed", (juce::int64) driftSeed, nullptr);
     state.appendChild (sceneTree, nullptr);
     return state.createXml();
 }
@@ -673,13 +695,16 @@ void RiqLiveProcessor::applyStateXml (const juce::XmlElement& xml)
     };
 
     {
-        std::array<juce::uint32, kNumStems * 2> sd {};
+        std::array<juce::uint32, kNumSeeds> sd {};
         for (size_t s = 0; s < seeds.size(); ++s)
             sd[s] = seeds[s].load();
         parseSeeds (state.getProperty ("seeds").toString(), sd);
         for (size_t s = 0; s < seeds.size(); ++s)
             seeds[s].store (sd[s]);
     }
+
+    if (state.hasProperty ("driftSeed"))
+        driftSeed = (juce::uint32) (juce::int64) state.getProperty ("driftSeed");
 
     auto sceneTree = state.getChildWithName ("SCENES");
     {
@@ -739,10 +764,21 @@ riq::AutopilotInput RiqLiveProcessor::makeAutopilotInput() const
         in.reverse[(size_t) s] = param (ID::stem (s, "reverse"));
     }
     in.fill = param (ID::apFill);
-    in.motion = param (ID::apMotion);
-    in.fillRatchet = param (ID::apRatchet);
+    in.ratchetAmount = param (ID::apRatchet);
     in.revDepth = param (ID::apRevDepth);
     in.drop = param (ID::apDrop);
+    in.build = param (ID::apBuild);
+    constexpr double kRates[] = { 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
+    in.drift = param (ID::apDrift);
+    in.rateBars = kRates[juce::jlimit (0, 5, (int) param (ID::apRate))];
+    in.smooth = param (ID::apSmooth) > 0.5f;
+    in.driftRatchet = param (ID::apDriftRat) > 0.5f;
+    in.driftReverse = param (ID::apDriftRev) > 0.5f;
+    in.driftSilence = param (ID::apDriftSil) > 0.5f;
+    in.driftSlice = param (ID::apDriftSlice) > 0.5f;
+    in.seed = driftSeed;
+    for (int s = 0; s < kNumStems; ++s)
+        in.silence[(size_t) s] = param (ID::stem (s, "silence"));
     in.evolveChance = param (ID::apEvolveChance);
     in.phraseBars = kPhraseBars[juce::jlimit (0, 2, (int) param (ID::apPhrase))];
     in.evolveEvery = kEvolveBars[juce::jlimit (0, 4, (int) param (ID::apEvolveEvery))];

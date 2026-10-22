@@ -51,10 +51,15 @@ WAVs were **not** analysed (they cancelled that), so nothing below is measured f
 - Grid style **Hitech**; Phrase **8 bars** (16 for long builds); Evolve every **4** bars, chance ~0.5.
 - Fill 0.7-0.9, Fill Ratchet 0.6-0.8, Motion 0.3-0.5, Drop 0.1-0.25, Rev Depth 0.2-0.3.
 - Buffer Freeze Q **Bar** or **Loop**; Scene Q **8 Bars**.
+- Autopilot is generative (user rejected canned, repeating fills and fixed A-A-B-A forms): IQ and the
+  linked stems' parameters drift on smoothed random walks; every Arrange/Reverse knob step has its own
+  pattern, so drifting = new patterns. Starting point: Drift 0.4-0.7, Rate 2-4 bars, Smooth on,
+  drift RAT + REV (SIL / SLICE for wilder sections), Build 0.5-0.8, Fill 0.5-0.8.
 
 ## Code pointers
 - Grid decisions: `Source/StemEngine.cpp` `StemEngine::decide()` (GridStyle::hitech branch:
   roll zone = last beat, or last two beats in a phrase-end bar; groove bars keep the 16th phase).
 - Autopilot plan: `Source/Autopilot.h` `planAutopilotBar()` - pure function, also drawn by the
-  phrase map in the editor.
+  phrase map in the editor (drift walks via driftNoise, build/fill, drops, evolve).
+- Per-step pattern memory: `seedIndex()` / `knobStep()` in PluginProcessor.h.
 - Keep options: `Protect` enum (append only - saved sets store indices).

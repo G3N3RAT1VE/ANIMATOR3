@@ -134,8 +134,9 @@ private:
     Toggle iqEvolve, iqReverse;
     std::array<std::unique_ptr<Toggle>, kNumStems> links;
     PhraseMap phraseMap;
-    Segmented apPhrase, apEvolveEvery;
-    Knob apFill, apMotion, apRatchet, apEvolveChance, apRevDepth, apDrop;
+    Segmented apPhrase, apEvolveEvery, apRate;
+    Toggle apSmooth, driftRat, driftRev, driftSil, driftSlice;
+    Knob apDrift, apBuild, apFill, apRatchet, apEvolveChance, apRevDepth, apDrop;
     juce::Rectangle<int> metersArea;
 };
 
