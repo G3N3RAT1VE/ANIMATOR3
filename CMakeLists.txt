@@ -69,3 +69,11 @@ if(RIQ_BUILD_TESTS)
     target_link_libraries(RiqLiveTest PRIVATE juce::juce_audio_utils juce::juce_dsp
         juce::juce_recommended_config_flags)
 endif()
+
+option(RIQ_BUILD_HOSTCHECK "Build the VST3 host check (loads installed bundles like a DAW)" OFF)
+if(RIQ_BUILD_HOSTCHECK)
+    juce_add_console_app(RiqHostCheck PRODUCT_NAME "RiqHostCheck")
+    target_sources(RiqHostCheck PRIVATE test/hostcheck.cpp)
+    target_compile_definitions(RiqHostCheck PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(RiqHostCheck PRIVATE juce::juce_audio_processors juce::juce_gui_basics juce::juce_recommended_config_flags)
+endif()

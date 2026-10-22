@@ -59,11 +59,17 @@ reported to Ableton (delay compensation lines it up).
 
 ## Build
 
+Build **outside** any folder Ableton scans for plug-ins (here `D:\REC\VST` is scanned): a second copy of the
+bundles with the same IDs confuses Live.
+
 ```
-cmake -B build -G "Visual Studio 16 2019" -A x64 -DRIQ_BUILD_TESTS=ON
-cmake --build build --config Release
-build\RiqLiveTest_artefacts\Release\RiqLiveTest.exe
+cmake -S . -B D:/REC/AUTOPILOT-build -G "Visual Studio 16 2019" -A x64 -DRIQ_BUILD_TESTS=ON -DRIQ_BUILD_HOSTCHECK=ON
+cmake --build D:/REC/AUTOPILOT-build --config Release
+D:/REC/AUTOPILOT-build/RiqLiveTest_artefacts/Release/RiqLiveTest.exe
+D:/REC/AUTOPILOT-build/RiqHostCheck_artefacts/Release/RiqHostCheck.exe "C:/Program Files/Common Files/VST3/AUTOPILOT.vst3"
 ```
+`RiqHostCheck` loads a built/installed bundle through JUCE's VST3 host like a DAW: instantiate, process,
+bus (de)activation, state save/restore, editor.
 Needs JUCE 8 at `C:/JUCE` (override with `-DJUCE_DIR=...`) and CMake >= 3.22.
 Genre notes for development: `.claude/skills/hitech-psytrance/SKILL.md`.
 
