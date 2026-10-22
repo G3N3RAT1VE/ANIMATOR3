@@ -212,7 +212,15 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
             }
         }
 
-        if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * w)
+        // Ratchet zone: weak beats (weighted as above), only the offbeat half of each beat,
+        // or only the second half of the bar (beats 3 & 4 in 4/4).
+        float wr = w;
+        if (s.ratchetZone == 1)
+            wr = fr >= 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+        else if (s.ratchetZone == 2)
+            wr = inBar >= bpb * 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+
+        if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * wr)
         {
             const float u = hash01 (seed, (juce::uint32) j, 4);
             int r = u < 0.65f ? 2 : 4; // straight subdivisions only, no triplets

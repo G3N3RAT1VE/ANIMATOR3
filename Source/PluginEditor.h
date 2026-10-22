@@ -138,7 +138,7 @@ private:
     Knob arrange, reverse, silence, ratchet, pan, gain;
     Momentary evolveArr, evolveRev;
     Toggle on, solo;
-    Segmented out;
+    Segmented out, rzone;
     int lastEvolveCount = 0;
     juce::uint32 flashUntil = 0;
 };

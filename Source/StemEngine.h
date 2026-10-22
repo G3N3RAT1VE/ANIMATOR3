@@ -75,6 +75,7 @@ struct StemSettings
     double sliceBeats = 0.25;
     double beatsPerBar = 4.0;
     Protect protect = Protect::oneAndThree;
+    int ratchetZone = 0; // where ratchets may happen: 0 weak beats, 1 offbeats, 2 beats 3 & 4
     float arrange = 0.0f, ratchet = 0.0f, reverse = 0.0f, silence = 0.0f;
     juce::uint32 seed = 1;    // arrange / ratchet variation
     juce::uint32 seedRev = 2; // reverse variation

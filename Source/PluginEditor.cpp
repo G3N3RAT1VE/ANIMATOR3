@@ -460,15 +460,17 @@ StemColumn::StemColumn (RiqLiveProcessor& p, int s)
       evolveRev (p.apvts, ID::stem (s, "evolveRev"), "EVOLVE"),
       on (p.apvts, ID::stem (s, "on"), "ON", Colours::text),
       solo (p.apvts, ID::stem (s, "solo"), "SOLO", Colours::armed),
-      out (p.apvts, ID::stem (s, "out"))
+      out (p.apvts, ID::stem (s, "out")),
+      rzone (p.apvts, ID::stem (s, "rzone"))
 {
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &source, &slice, &wave, &hold, &capture, &arrange, &reverse, &silence, &ratchet,
-             &pan, &gain, &evolveArr, &evolveRev, &on, &solo, &out })
+             &pan, &gain, &evolveArr, &evolveRev, &on, &solo, &out, &rzone })
         addAndMakeVisible (c);
 
     hold.setTooltip ("Hold: repeats the currently playing slice (Rhythmiq Freeze).");
     capture.setTooltip ("IN: the track streams live into the buffer. Click to FREEZE the buffer contents (quantised by Freeze Q).");
+    rzone.setTooltip ("Where ratchets happen: Weak = weak beats, Offbeat = second half of every beat, 3 & 4 = beats 3 and 4");
     ratchet.slider.setTooltip ("Subdivides weak-beat slices into 2 or 4 retriggers (no triplets).");
     out.setTooltip ("Mix: stem plays on the main output. Own: only on its own output (Stem " + juce::String (s + 1) + ").");
 
@@ -543,6 +545,7 @@ void StemColumn::resized()
         k->setBounds (r.withX (r.getX() + kw * i++).withWidth (kw).withSizeKeepingCentre (kw, juce::jmin (r.getHeight(), kw + 14)));
     evolveArr.setBounds (evo.withX (evo.getX()).withWidth (kw).reduced (8, 0));
     evolveRev.setBounds (evo.withX (evo.getX() + kw).withWidth (kw).reduced (8, 0));
+    rzone.setBounds (evo.withX (evo.getX() + 2 * kw).withWidth (2 * kw).reduced (4, 0));
 
     bottom.removeFromTop (4);
     auto btns = bottom.removeFromLeft (120);

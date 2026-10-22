@@ -242,6 +242,33 @@ int main()
     std::cout << "  ratcheted slices seen " << ratchets << "\n";
     check (noTriplets && ratchets > 100, "ratchet uses only x2 / x4, never triplets");
 
+    // Ratchet zones: Offbeat = only the second half of each beat, 3 & 4 = only beats 3 and 4.
+    for (int zone = 1; zone <= 2; ++zone)
+    {
+        setParam (engine, "s1_rzone", (float) zone);
+        int inZone = 0, outZone = 0;
+        for (int evo = 0; evo < 60; ++evo)
+        {
+            setParam (engine, "s1_evolveArr", 1.0f);
+            run (0.25);
+            setParam (engine, "s1_evolveArr", 0.0f);
+            run (0.25);
+            auto& st = engine.getStem (0);
+            const double sl = st.dispSlice.load();
+            for (int j = 0; j < st.dispSlices.load(); ++j)
+            {
+                if (riq::SliceDecision::unpack (st.sliceInfo[(size_t) j].load()).ratchet <= 1)
+                    continue;
+                const double inBar = std::fmod (j * sl, 4.0);
+                const bool ok = zone == 1 ? std::fmod (inBar, 1.0) >= 0.5 - 1.0e-9 : inBar >= 2.0 - 1.0e-9;
+                (ok ? inZone : outZone)++;
+            }
+        }
+        std::cout << "  ratchet zone " << zone << ": " << inZone << " in zone, " << outZone << " outside\n";
+        check (inZone > 20 && outZone == 0, zone == 1 ? "ratchet zone Offbeat: only on offbeats" : "ratchet zone 3 & 4: only on beats 3-4");
+    }
+    setParam (engine, "s1_rzone", 0.0f);
+
     // 3) Freeze (quantised to loop) then silence the input: frozen loop must keep playing.
     setParam (engine, "s1_ratchet", 0.0f);
     setParam (engine, "s1_arrange", 0.0f);

@@ -60,6 +60,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
         choice (ID::stem (s, "out"), n + "Output", { "Mix", "Own" }, 0);
         toggle (ID::stem (s, "freeze"), n + "Buffer Frozen", false);
         choice (ID::stem (s, "slice"), n + "Slice Size", slices, 2);
+        choice (ID::stem (s, "rzone"), n + "Ratchet Zone", { "Weak", "Offbeat", "3 & 4" }, 0);
         knob (ID::stem (s, "arrange"), n + "Arrange", 0.0f, 1.0f, 0.0f);
         knob (ID::stem (s, "ratchet"), n + "Ratchet", 0.0f, 1.0f, 0.0f);
         knob (ID::stem (s, "reverse"), n + "Reverse", 0.0f, 1.0f, 0.0f);
@@ -507,6 +508,7 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         st.sliceBeats = kSliceBeats[juce::jlimit (0, 3, (int) param (ID::stem (s, "slice")))];
         st.beatsPerBar = bpb;
         st.protect = protect;
+        st.ratchetZone = juce::jlimit (0, 2, (int) param (ID::stem (s, "rzone")));
         st.arrange = param (ID::stem (s, "arrange"));
         st.ratchet = param (ID::stem (s, "ratchet"));
         st.reverse = param (ID::stem (s, "reverse"));
