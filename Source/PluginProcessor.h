@@ -76,6 +76,8 @@ public:
     int getSendSlot() const { return sendMode ? (int) apvts.getRawParameterValue (riq::ID::slot)->load() : -1; }
 
     void requestScene (int index) { pendingScene.store (index); }
+    // Evolve from the UI: counted, so even a very short click is never lost between blocks.
+    void requestEvolve (int stem, int kind) { evolveRequests[kind * riq::kNumStems + stem].fetch_add (1); }
     void saveScene (int index);
     bool isSceneValid (int index) const;
     int getActiveScene() const { return activeScene.load(); }
@@ -146,6 +148,8 @@ private:
     // [0..2] arrange seeds, [3..5] reverse seeds
     std::array<std::atomic<juce::uint32>, riq::kNumStems * 2> seeds;
     std::array<bool, riq::kNumStems * 2> lastEvolve {};
+    std::atomic<int> evolveRequests[riq::kNumStems * 2] {};
+    std::array<int, riq::kNumStems * 2> evolveHandled {};
 
     juce::int64 lastIqBar = std::numeric_limits<juce::int64>::min();
     juce::int64 hostBarPrev = std::numeric_limits<juce::int64>::min();

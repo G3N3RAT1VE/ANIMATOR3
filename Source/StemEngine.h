@@ -78,6 +78,7 @@ struct StemSettings
     double beatsPerBar = 4.0;
     Protect protect = Protect::oneAndThree;
     GridStyle style = GridStyle::hitech;
+    int ratchetZone = 0; // where ratchets may happen: 0 by grid style, 1 offbeats, 2 beats 3 & 4
     bool fillBar = false; // Beat Assistant: this bar ends a phrase
     float arrange = 0.0f, ratchet = 0.0f, reverse = 0.0f, silence = 0.0f;
     juce::uint32 seed = 1;    // arrange / ratchet variation

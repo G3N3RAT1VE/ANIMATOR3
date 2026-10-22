@@ -93,6 +93,24 @@ private:
     bool down = false;
 };
 
+// Button that fires on press (not on release) - used for Evolve.
+class PressButton : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+    std::function<void()> onPress;
+    void buttonStateChanged() override
+    {
+        const bool isDown = getState() == juce::Button::buttonDown;
+        if (isDown && ! down && onPress != nullptr)
+            onPress();
+        down = isDown;
+    }
+
+private:
+    bool down = false;
+};
+
 // Waveform of what a stem currently plays (or the sum of all stems when stemIndex < 0).
 class WaveView : public juce::Component
 {
@@ -192,7 +210,8 @@ private:
     Momentary hold;
     Toggle capture, autoLink;
     Knob arrange, reverse, silence, ratchet, pan, gain;
-    Momentary evolveArr, evolveRev;
+    PressButton evolveArr { "EVOLVE" }, evolveRev { "EVOLVE" };
+    Segmented rzone;
     Toggle on, solo;
     Segmented out;
     int lastEvolveCount = 0;

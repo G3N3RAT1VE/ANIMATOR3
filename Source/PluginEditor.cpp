@@ -888,18 +888,22 @@ StemLane::StemLane (RiqLiveProcessor& p, int s)
       ratchet (p.apvts, ID::stem (s, "ratchet"), "RATCHET", Colours::edit),
       pan (p.apvts, ID::stem (s, "pan"), "PAN", Colours::dim),
       gain (p.apvts, ID::stem (s, "gain"), "GAIN", Colours::dim),
-      evolveArr (p.apvts, ID::stem (s, "evolveArr"), "EVOLVE"),
-      evolveRev (p.apvts, ID::stem (s, "evolveRev"), "EVOLVE"),
+      rzone (p.apvts, ID::stem (s, "rzone"), Colours::edit),
       on (p.apvts, ID::stem (s, "on"), "ON", Colours::stem[s]),
       solo (p.apvts, ID::stem (s, "solo"), "SOLO", Colours::armed),
       out (p.apvts, ID::stem (s, "out"), Colours::stem[s])
 {
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &source, &keep, &slice, &wave, &hold, &capture, &autoLink, &arrange, &reverse, &silence, &ratchet,
-             &pan, &gain, &evolveArr, &evolveRev, &on, &solo, &out })
+             &pan, &gain, &evolveArr, &evolveRev, &on, &solo, &out, &rzone })
         addAndMakeVisible (c);
 
     hold.setTooltip ("Hold: repeats the currently playing slice");
+    evolveArr.setTooltip ("New arrangement / ratchet pattern for this stem (works with IQ Evolve on too)");
+    evolveRev.setTooltip ("New reverse pattern for this stem");
+    rzone.setTooltip ("Where ratchets happen: Auto = by grid style, Offbeat = second half of every beat, 3 & 4 = beats 3 and 4");
+    evolveArr.onPress = [this] { proc.requestEvolve (stem, 0); flashUntil = juce::Time::getMillisecondCounter() + 250; };
+    evolveRev.onPress = [this] { proc.requestEvolve (stem, 1); flashUntil = juce::Time::getMillisecondCounter() + 250; };
     capture.setTooltip ("IN: the track streams live into the buffer. Click to FREEZE the buffer contents (quantised by Freeze Q)");
     autoLink.setTooltip ("This stem follows the autopilot");
     keep.setTooltip ("KEEP: slices on these positions are never edited (Global = top bar). Kick: All Beats, hats: Off-Beats");
@@ -980,6 +984,7 @@ void StemLane::resized()
         k->setBounds (knobs.getX() + kw * i++, knobs.getY(), kw, knobs.getHeight());
     evolveArr.setBounds (evo.getX() + 6, evo.getY(), kw - 12, evo.getHeight());
     evolveRev.setBounds (evo.getX() + kw + 6, evo.getY(), kw - 12, evo.getHeight());
+    rzone.setBounds (evo.getX() + 2 * kw + 4, evo.getY(), 2 * kw - 8, evo.getHeight());
 
     right.removeFromLeft (10);
     auto col = right.removeFromLeft (84);
@@ -1033,8 +1038,7 @@ void StemLane::refresh()
     setGhost (ratchet, linked && iqArr, proc.effRatchet[stem].load());
     setGhost (reverse, linked && iqRev, proc.effReverse[stem].load());
 
-    evolveArr.setEnabled (! (linked && iqEvo));
-    evolveRev.setEnabled (! (linked && iqEvo));
+    juce::ignoreUnused (iqEvo);
     const int ec = proc.evolveCount[stem].load();
     if (ec != lastEvolveCount)
     {

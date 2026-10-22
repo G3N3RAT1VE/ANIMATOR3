@@ -67,6 +67,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
         StringArray stemKeeps { "Global" };
         stemKeeps.addArray (keeps);
         choice (ID::stem (s, "keep"), n + "Keep", stemKeeps, 0);
+        choice (ID::stem (s, "rzone"), n + "Ratchet Zone", { "Auto", "Offbeat", "3 & 4" }, 0);
         toggle (ID::stem (s, "freeze"), n + "Buffer Frozen", false);
         choice (ID::stem (s, "slice"), n + "Slice Size", slices, 2);
         knob (ID::stem (s, "arrange"), n + "Arrange", 0.0f, 1.0f, 0.0f);
@@ -383,9 +384,12 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // ---- evolve buttons (rising edge) ----
     for (int k = 0; k < kNumStems * 2; ++k)
     {
+        // parameter rising edge (MIDI map / automation) or a click in the UI
         const bool ev = param (ID::stem (k % kNumStems, k < kNumStems ? "evolveArr" : "evolveRev")) > 0.5f;
-        if (ev && ! lastEvolve[(size_t) k])
-            seeds[(size_t) k].store (hash32 (seeds[(size_t) k].load(), 77u, (juce::uint32) k) | 1u);
+        const int requests = evolveRequests[k].load();
+        if ((ev && ! lastEvolve[(size_t) k]) || requests != evolveHandled[(size_t) k])
+            seeds[(size_t) k].store (hash32 (seeds[(size_t) k].load(), 77u + (juce::uint32) requests, (juce::uint32) k) | 1u);
+        evolveHandled[(size_t) k] = requests;
         lastEvolve[(size_t) k] = ev;
     }
 
@@ -501,6 +505,7 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         const int stemKeep = (int) param (ID::stem (s, "keep"));
         st.protect = (Protect) juce::jlimit (0, 5, stemKeep > 0 ? stemKeep - 1 : globalKeep);
         st.style = style;
+        st.ratchetZone = juce::jlimit (0, 2, (int) param (ID::stem (s, "rzone")));
         st.fillBar = plan.fillBar;
         st.arrange = ap.arrange;
         st.ratchet = ap.ratchet;

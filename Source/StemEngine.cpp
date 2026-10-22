@@ -239,6 +239,12 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
             }
         }
 
+        // Ratchet zone override: only the offbeat half of every beat, or only beats 3 & 4.
+        if (s.ratchetZone == 1)
+            wRat = frac >= 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+        else if (s.ratchetZone == 2)
+            wRat = inBar >= bpb * 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+
         if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * wRat)
         {
             // Straight subdivisions only, no triplets.

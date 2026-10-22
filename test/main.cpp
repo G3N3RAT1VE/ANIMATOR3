@@ -1,5 +1,6 @@
 // Offline sanity test: one SEND instance + one ENGINE instance driven by a fake host transport.
 #include "../Source/PluginProcessor.h"
+#include "../Source/PluginEditor.h"
 #include <iostream>
 #include <set>
 
@@ -409,6 +410,77 @@ int main()
         check (evolves >= 3 && evolves <= 5, "IQ Evolve every 4 bars keeps firing inside a host loop");
         setParam (engine, "iqArrange", 0.0f);
         setParam (engine, "iqEvolve", 0.0f);
+        run (1.0);
+    }
+
+    // 5g) EVOLVE buttons: pressing the button in the UI gives the stem a new arrangement,
+    //     also while IQ Evolve is running.
+    {
+        auto table = [&]
+        {
+            juce::String t;
+            auto& st = engine.getStem (0);
+            for (int j = 0; j < st.dispSlices.load(); ++j)
+                t << (int) st.sliceInfo[(size_t) j].load() << ",";
+            return t;
+        };
+        setParam (engine, "s1_arrange", 0.7f);
+        setParam (engine, "s1_ratchet", 0.5f);
+        setParam (engine, "iqEvolve", 1.0f);
+        run (1.0);
+        riq::Momentary btn (engine.apvts, "s1_evolveArr", "EVOLVE");
+        int changed = 0;
+        for (int press = 0; press < 5; ++press)
+        {
+            const auto before = table();
+            btn.setState (juce::Button::buttonDown); // what a mouse press does
+            run (0.25);
+            btn.setState (juce::Button::buttonNormal);
+            run (0.25);
+            changed += table() != before ? 1 : 0;
+        }
+        std::cout << "  evolve button: arrangement changed on " << changed << " of 5 presses\n";
+        check (changed == 5, "EVOLVE parameter press gives a new arrangement every time (IQ Evolve on)");
+
+        // UI clicks go straight to the engine as counted requests: a click shorter than one
+        // audio block (down + up before the next block) must still count.
+        int changedUi = 0;
+        for (int press = 0; press < 5; ++press)
+        {
+            const auto before = table();
+            engine.requestEvolve (0, 0);
+            run (0.25);
+            changedUi += table() != before ? 1 : 0;
+        }
+        check (changedUi == 5, "EVOLVE click from the UI is never lost");
+
+        // Ratchet zones: Offbeat = only the second half of each beat, 3 & 4 = only beats 3 and 4.
+        for (int zone = 1; zone <= 2; ++zone)
+        {
+            setParam (engine, "s1_rzone", (float) zone);
+            int inZone = 0, outZone = 0;
+            for (int evo = 0; evo < 40; ++evo)
+            {
+                engine.requestEvolve (0, 0);
+                run (0.25);
+                auto& st = engine.getStem (0);
+                const double sl = st.dispSlice.load();
+                for (int j = 0; j < st.dispSlices.load(); ++j)
+                {
+                    if (riq::SliceDecision::unpack (st.sliceInfo[(size_t) j].load()).ratchet <= 1)
+                        continue;
+                    const double inBar = std::fmod (j * sl, 4.0);
+                    const bool ok = zone == 1 ? std::fmod (inBar, 1.0) >= 0.5 - 1.0e-9 : inBar >= 2.0 - 1.0e-9;
+                    (ok ? inZone : outZone)++;
+                }
+            }
+            std::cout << "  ratchet zone " << zone << ": " << inZone << " in zone, " << outZone << " outside\n";
+            check (inZone > 20 && outZone == 0, zone == 1 ? "ratchet zone Offbeat: only on offbeats" : "ratchet zone 3 & 4: only on beats 3-4");
+        }
+        setParam (engine, "s1_rzone", 0.0f);
+        setParam (engine, "iqEvolve", 0.0f);
+        setParam (engine, "s1_arrange", 0.0f);
+        setParam (engine, "s1_ratchet", 0.0f);
         run (1.0);
     }
 
