@@ -13,6 +13,14 @@ StemEngine::StemEngine()
 
 void StemEngine::prepare (double sampleRate)
 {
+    // Hosts re-prepare plug-ins often (latency change, set switch, audio engine restart):
+    // at the same sample rate keep the captured / frozen audio, only restart playback.
+    if (capacity > 0 && std::abs (sampleRate - sr) < 1.0e-6)
+    {
+        resetPlayback();
+        return;
+    }
+
     sr = sampleRate;
     // Room for kCaptureBeats down to 40 BPM.
     capacity = (int) std::ceil (kCaptureBeats * sr * 60.0 / 40.0) + 16;

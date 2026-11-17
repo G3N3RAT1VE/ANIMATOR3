@@ -160,7 +160,8 @@ bool RiqLiveProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void RiqLiveProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     sr = sampleRate;
-    delaySamples = juce::jmax (64, samplesPerBlock) + (int) std::ceil (kInputLatencyHeadroomSec * sampleRate);
+    blockDelay = juce::jmax (64, samplesPerBlock);
+    delaySamples = blockDelay + inLatHeadroom.load();
 
     if (sendMode)
     {
@@ -226,8 +227,22 @@ juce::String RiqLiveProcessor::getSlotTrackName (int slot)
     return names.joinIntoString (" + ");
 }
 
-bool RiqLiveProcessor::readSlot (int slot, juce::int64 t, float* l, float* r, float* tmpL, float* tmpR, int n)
+bool RiqLiveProcessor::readSlot (int slot, juce::int64 t, float* l, float* r, float* tmpL, float* tmpR, int n,
+                                 juce::int64 loopStart, juce::int64 loopLen)
 {
+    // Inside a host loop the read window may run over the loop end: the rest comes from the loop start.
+    auto readEntry = [&] (const SendEntry& e, float* dl, float* dr)
+    {
+        if (loopLen <= 0)
+            return e.ring.read (t, dl, dr, n);
+        const auto loopEnd = loopStart + loopLen;
+        const int k = (t < loopEnd && t + n > loopEnd) ? (int) (loopEnd - t) : n;
+        bool ok = e.ring.read (t, dl, dr, k, true);
+        if (k < n)
+            ok = e.ring.read (loopStart, dl + k, dr + k, n - k, true) || ok;
+        return ok;
+    };
+
     // Sum every Send pointed at this slot, exactly like several tracks routed into one.
     const auto now = juce::Time::getMillisecondCounter();
     bool any = false;
@@ -235,7 +250,7 @@ bool RiqLiveProcessor::readSlot (int slot, juce::int64 t, float* l, float* r, fl
     {
         if (! e.isActive (now) || e.slot.load() != slot)
             continue;
-        if (! e.ring.read (t, any ? tmpL : l, any ? tmpR : r, n))
+        if (! readEntry (e, any ? tmpL : l, any ? tmpR : r))
             continue;
         if (any)
         {
@@ -250,6 +265,12 @@ bool RiqLiveProcessor::readSlot (int slot, juce::int64 t, float* l, float* r, fl
         std::fill (r, r + n, 0.0f);
     }
     return any;
+}
+
+void RiqLiveProcessor::handleAsyncUpdate()
+{
+    // A Send's Input Latency changed: tell the host the new engine latency.
+    setLatencySamples (blockDelay + inLatHeadroom.load() + limiters[0].getLatency());
 }
 
 void RiqLiveProcessor::processSend (juce::AudioBuffer<float>& buffer, bool playing, juce::int64 t)
@@ -280,6 +301,9 @@ void RiqLiveProcessor::processSend (juce::AudioBuffer<float>& buffer, bool playi
 
     auto& entry = bus.sends[ownedEntry];
     entry.slot.store (slot);
+    const auto inLat = (juce::int64) std::llround (juce::jlimit (0.0f, (float) (kInputLatencyHeadroomSec * 1000.0),
+                                                                  param (ID::inLatency)) * 0.001 * sr);
+    entry.inLatency.store ((int) inLat);
     if (publishedNameVersion != trackNameVersion.load())
     {
         publishedNameVersion = trackNameVersion.load();
@@ -288,8 +312,6 @@ void RiqLiveProcessor::processSend (juce::AudioBuffer<float>& buffer, bool playi
 
     if (playing)
     {
-        const auto inLat = (juce::int64) std::llround (juce::jlimit (0.0f, (float) (kInputLatencyHeadroomSec * 1000.0),
-                                                                      param (ID::inLatency)) * 0.001 * sr);
         entry.ring.write (t - inLat, L, R, n);
         // While playing, the engine plays this track; stopped, it passes through.
         if (param (ID::sendThru) < 0.5f)
@@ -338,6 +360,8 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     bool playing = false;
     double bpm = 120.0, ppq = 0.0, bpb = 4.0;
     juce::int64 t = 0;
+    bool looping = false;
+    double loopStartPpq = 0.0, loopEndPpq = 0.0;
 
     if (auto* ph = getPlayHead())
     {
@@ -349,6 +373,13 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             if (auto ts = pos->getTimeSignature())
                 bpb = juce::jmax (1.0, ts->numerator * 4.0 / juce::jmax (1, ts->denominator));
             t = pos->getTimeInSamples().orFallback ((juce::int64) std::llround (ppq * 60.0 / bpm * sr));
+            if (pos->getIsLooping())
+                if (auto lp = pos->getLoopPoints())
+                {
+                    looping = lp->ppqEnd > lp->ppqStart;
+                    loopStartPpq = lp->ppqStart;
+                    loopEndPpq = lp->ppqEnd;
+                }
         }
     }
     bpm = juce::jlimit (20.0, 999.0, bpm);
@@ -365,10 +396,44 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     handleMidi (midi);
     midi.clear();
 
+    // Send Input Latency: keep exactly as much headroom as the Sends ask for (minimal latency).
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        int need = 0;
+        for (const auto& e : SharedBus::get().sends)
+            if (e.isActive (now))
+                need = juce::jmax (need, e.inLatency.load());
+        if (need != inLatHeadroom.load())
+        {
+            inLatHeadroom.store (need);
+            triggerAsyncUpdate();
+        }
+        if (delaySamples != blockDelay + need)
+        {
+            delaySamples = blockDelay + need;
+            jumpMute = delaySamples;
+            for (auto& s : stems)
+                s.resetPlayback();
+        }
+    }
+
     const double spb = sr * 60.0 / bpm;
     const double pps = 1.0 / spb;
-    const double ppqT = ppq - delaySamples * pps;
-    const juce::int64 readT = t - delaySamples;
+    double ppqT = ppq - delaySamples * pps;
+    juce::int64 readT = t - delaySamples;
+
+    // Host loop: the delayed position wraps back to the end of the loop (heard on the previous
+    // pass) instead of falling before the loop start, where nothing was played.
+    const double loopLenPpq = looping ? loopEndPpq - loopStartPpq : 0.0;
+    const auto loopStartS = (juce::int64) std::llround (loopStartPpq * spb);
+    const auto loopLenS = (juce::int64) std::llround (loopLenPpq * spb);
+    const bool inLoop = looping && loopLenS > delaySamples + n && loopLenS < TimelineRing::kSize / 2
+                        && ppq >= loopStartPpq - 1.0e-6 && ppq < loopEndPpq + 1.0e-6;
+    if (inLoop && readT < loopStartS)
+    {
+        readT += loopLenS;
+        ppqT += loopLenPpq;
+    }
 
     // ---- scenes ----
     int req = pendingScene.exchange (-1);
@@ -425,7 +490,8 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     }
 
     // Hosts may report positions that wobble by a few samples; only a real relocation counts as a jump.
-    if (! wasPlaying || std::abs (t - expectedTime) > 64)
+    const bool loopWrap = inLoop && std::abs (t + loopLenS - expectedTime) <= 64;
+    if (! wasPlaying || (std::abs (t - expectedTime) > 64 && ! loopWrap))
     {
         // Transport started or jumped: the delayed region of the rings is stale.
         jumpMute = delaySamples;
@@ -507,7 +573,8 @@ void RiqLiveProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     for (int s = 0; s < kNumStems; ++s)
     {
         const int src = juce::jlimit (0, 2, (int) param (ID::stem (s, "src")));
-        const bool ok = readSlot (src, readT, iL, iR, tmpBuf.getWritePointer (0), tmpBuf.getWritePointer (1), n);
+        const bool ok = readSlot (src, readT, iL, iR, tmpBuf.getWritePointer (0), tmpBuf.getWritePointer (1), n,
+                                  inLoop ? loopStartS : 0, inLoop ? loopLenS : 0);
         sourceOk[s].store (ok ? 1 : 0);
 
         if (jumpMute > 0)

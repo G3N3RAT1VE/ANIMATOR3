@@ -16,6 +16,7 @@ struct FakeHead : juce::AudioPlayHead
     int wobble = 0; // host position jitter in samples
     juce::int64 loopLen = 0; // host loop length in samples (0 = no loop)
     juce::int64 pos() const { return (loopLen > 0 ? t % loopLen : t) + wobble; }
+    bool reportLoop = false; // tell the plug-in the loop points, as Live does
     juce::Optional<PositionInfo> getPosition() const override
     {
         PositionInfo p;
@@ -24,6 +25,11 @@ struct FakeHead : juce::AudioPlayHead
         p.setTimeInSamples (pos());
         p.setPpqPosition ((double) pos() / kSpb);
         p.setTimeSignature (juce::AudioPlayHead::TimeSignature { 4, 4 });
+        if (loopLen > 0 && reportLoop)
+        {
+            p.setIsLooping (true);
+            p.setLoopPoints (juce::AudioPlayHead::LoopPoints { 0.0, (double) loopLen / kSpb });
+        }
         return p;
     }
 };
@@ -86,7 +92,7 @@ int main()
         {
             for (int i = 0; i < kBlock; ++i)
             {
-                const float v = silenceInput ? 0.0f : source (head.t + i);
+                const float v = silenceInput ? 0.0f : source ((head.loopLen > 0 ? head.t % head.loopLen : head.t) + i);
                 sb.setSample (0, i, v);
                 sb.setSample (1, i, v);
             }
@@ -206,6 +212,48 @@ int main()
     check (dropouts == 0, "position jitter causes no dropouts");
     run (1.0); // re-settle after jitter
 
+    // 1d) Live loops 2 bars and reports its loop points: no hole at the loop seam, and from the
+    //     second pass on the stem is bit-exact (the delayed position reads the loop end of the previous pass).
+    {
+        const auto L = (juce::int64) (8 * kSpb);
+        while (head.t % L != 0) // start the loop on a pass boundary
+            run (kBlock / kSpb);
+        head.loopLen = L;
+        head.reportLoop = true;
+        const auto loopFrom = outLog.size();
+        run (3 * 8.0); // three passes
+        head.loopLen = 0;
+        head.reportLoop = false;
+        double loopErr = 0.0;
+        for (auto s = loopFrom + (size_t) L; s < outLog.size(); ++s)
+        {
+            auto p = (juce::int64) (s - loopFrom) % L - D;
+            if (p < 0)
+                p += L;
+            loopErr = juce::jmax (loopErr, (double) std::abs (outLog[s] - source (p)));
+        }
+        std::cout << "  host loop with loop points: max error " << loopErr << "\n";
+        check (loopErr < 1.0e-6, "host loop: no hole at the seam, exact from the second pass");
+        // back to a straight timeline
+        head.t = ((head.t / L) + 1) * L * 4;
+        run (2.0);
+    }
+
+    // 1e) Send Input Latency adds exactly its own headroom, and 0 brings the minimal latency back.
+    {
+        setParam (send, "inLatency", 20.0f);
+        run (0.5);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+        const int withLat = engine.getLatencySamples();
+        setParam (send, "inLatency", 0.0f);
+        run (0.5);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+        const int back = engine.getLatencySamples();
+        std::cout << "  latency with 20 ms Input Latency: " << withLat << ", back at 0: " << back << "\n";
+        check (withLat == D + 960 && back == D, "Input Latency headroom is only what the Sends ask for");
+        run (2.0);
+    }
+
     // 2) Ratchet + arrange: beats 1 and 3 stay untouched, weak 16ths get retriggered.
     setParam (engine, "s1_ratchet", 1.0f);
     setParam (engine, "s1_arrange", 0.6f);
@@ -286,6 +334,18 @@ int main()
     rms = std::sqrt (rms / (double) (outLog.size() - silentFrom));
     std::cout << "  frozen rms " << rms << "  max error vs source phase " << errFrozen << " at bar beat " << worstPos << "\n";
     check (rms > 0.01, "frozen loop keeps playing after the input goes silent");
+
+    // Hosts re-prepare plug-ins (latency change, set switch): the frozen loop must survive it.
+    {
+        engine.prepareToPlay (kSr, kBlock);
+        const auto rpFrom = outLog.size();
+        run (4.0);
+        double rpRms = 0.0;
+        for (auto s = rpFrom + (size_t) D + 2000; s < outLog.size(); ++s)
+            rpRms += (double) outLog[s] * outLog[s];
+        rpRms = std::sqrt (rpRms / (double) (outLog.size() - rpFrom));
+        check (rpRms > 0.01, "frozen loop survives the host re-preparing the plug-in");
+    }
     check (errFrozen < 1.0e-3, "frozen loop stays aligned to the bar grid");
 
     // 4) Back to IN with silent input: output must follow the (silent) live input.

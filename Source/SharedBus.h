@@ -24,7 +24,8 @@ namespace riq
 // Plain data only: it lives in shared memory and all-zero bytes is a valid empty state.
 struct TimelineRing
 {
-    static constexpr int kSize = 1 << 17;
+    // ~10.9 s at 48 kHz: enough to read the end of a host loop back from the previous pass
+    static constexpr int kSize = 1 << 19;
     static constexpr int kMask = kSize - 1;
 
     void write (juce::int64 t, const float* l, const float* r, int n) noexcept
@@ -40,13 +41,15 @@ struct TimelineRing
     }
 
     // Returns false (and outputs silence) when nobody has fed this ring recently.
-    bool read (juce::int64 t, float* l, float* r, int n) const noexcept
+    // `looped`: reading the end of a host loop from the previous pass, which lies after the
+    // write position on the timeline - only freshness is checked then.
+    bool read (juce::int64 t, float* l, float* r, int n, bool looped = false) const noexcept
     {
         const auto w = writtenUntil.load (std::memory_order_acquire);
         const auto last = lastWriteMs.load (std::memory_order_acquire);
         const auto age = juce::Time::getMillisecondCounter() - last;
 
-        if (last == 0 || w < t + n || w - t > kSize / 2 || age > 500)
+        if (last == 0 || age > 500 || (! looped && (w < t + n || w - t > kSize / 2)))
         {
             std::fill (l, l + n, 0.0f);
             std::fill (r, r + n, 0.0f);
@@ -78,6 +81,7 @@ struct SendEntry
     std::atomic<juce::uint64> owner;   // instance id of the Send using this entry, 0 = free
     std::atomic<juce::uint32> claimMs; // owner's heartbeat (every block, playing or not)
     std::atomic<int> slot;             // 0..2 = A..C
+    std::atomic<int> inLatency;        // samples the Send stamps its audio earlier (Input Latency)
     char name[64];                     // owner's track name
 
     bool isActive (juce::uint32 now) const noexcept
@@ -131,7 +135,7 @@ private:
     SharedBus()
     {
        #if JUCE_WINDOWS
-        const auto name = "Local\\RiQLiveBus_v3_" + juce::String ((juce::int64) GetCurrentProcessId());
+        const auto name = "Local\\RiQLiveBus_v4_" + juce::String ((juce::int64) GetCurrentProcessId());
         mapping = CreateFileMappingW (INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       (DWORD) sizeof (SharedBusData), name.toWideCharPointer());
         if (mapping != nullptr)

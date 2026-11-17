@@ -37,7 +37,8 @@ inline const char* const kSceneStemParams[kSceneParamsPerStem] =
 // One class, two plug-ins:
 //  - engine (instrument, "AUTOPILOT"): 3 stem engines, outputs Mix + Stem 1..3
 //  - send   (effect, "AUTOPILOT Send"): streams its track into bus slot A/B/C
-class RiqLiveProcessor : public juce::AudioProcessor
+class RiqLiveProcessor : public juce::AudioProcessor,
+                         private juce::AsyncUpdater
 {
 public:
     explicit RiqLiveProcessor (bool sendMode);
@@ -130,7 +131,9 @@ private:
     void processSend (juce::AudioBuffer<float>&, bool playing, juce::int64 t);
     std::unique_ptr<juce::XmlElement> createStateXml();
     void applyStateXml (const juce::XmlElement& xml);
-    static bool readSlot (int slot, juce::int64 t, float* l, float* r, float* tmpL, float* tmpR, int n);
+    static bool readSlot (int slot, juce::int64 t, float* l, float* r, float* tmpL, float* tmpR, int n,
+                          juce::int64 loopStart = 0, juce::int64 loopLen = 0);
+    void handleAsyncUpdate() override;
     void applyScene (int index);
     void handleMidi (const juce::MidiBuffer& midi);
     float param (const juce::String& id) const { return apvts.getRawParameterValue (id)->load(); }
@@ -160,9 +163,12 @@ private:
     bool fillWasActive = false;
 
     double sr = 44100.0;
-    int delaySamples = 512;
-    // Headroom for Sends whose input is late by their source tracks' plug-in latency (Input Latency param).
-    static constexpr double kInputLatencyHeadroomSec = 0.080;
+    int delaySamples = 512;  // engine read delay = one block + the largest Send Input Latency
+    int blockDelay = 512;
+    // Headroom for Sends whose input is late by their source tracks' plug-in latency (Input Latency param):
+    // only as much as the Sends actually ask for, so the latency stays minimal.
+    static constexpr double kInputLatencyHeadroomSec = 0.080; // maximum
+    std::atomic<int> inLatHeadroom { 0 };
     juce::int64 expectedTime = 0;
     int jumpMute = 0;
 

@@ -68,7 +68,7 @@ option(RIQ_BUILD_TESTS "Build offline engine test" OFF)
 if(RIQ_BUILD_TESTS)
     juce_add_console_app(RiqLiveTest PRODUCT_NAME "RiqLiveTest")
     target_sources(RiqLiveTest PRIVATE test/main.cpp ${RIQ_SOURCES})
-    target_compile_definitions(RiqLiveTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_compile_definitions(RiqLiveTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(RiqLiveTest PRIVATE juce::juce_audio_utils juce::juce_dsp
         juce::juce_recommended_config_flags)
 endif()
