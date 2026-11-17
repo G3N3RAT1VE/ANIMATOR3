@@ -178,21 +178,40 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
     const double bpb = s.beatsPerBar;
     const double pos = j * S;
     const double inBar = wrapBeat (pos, bpb);
-    const bool onBeat = std::abs (inBar - std::round (inBar)) < 1.0e-6;
 
     const double beatIdx = std::floor (inBar + 1.0e-9);
     const double frac = inBar - beatIdx;
-    const bool oddBeat = onBeat && ((int) std::round (inBar) % 2) == 1;
 
-    bool strong = false;
-    switch (s.protect)
+    // Is a position (beats from the loop start) one of the KEEP positions?
+    auto isKept = [&] (double p)
     {
-        case Protect::off:         strong = false; break;
-        case Protect::downbeat:    strong = inBar < 1.0e-6; break;
-        case Protect::oneAndThree: strong = inBar < 1.0e-6 || (std::fmod (bpb, 2.0) < 1.0e-6 && std::abs (inBar - bpb * 0.5) < 1.0e-6); break;
-        case Protect::allBeats:    strong = onBeat; break;
-        case Protect::twoAndFour:  strong = oddBeat; break;
-        case Protect::offBeats:    strong = std::abs (frac - 0.5) < 1.0e-6; break;
+        const double b = wrapBeat (p, bpb);
+        const bool beat = std::abs (b - std::round (b)) < 1.0e-6;
+        const double f = b - std::floor (b + 1.0e-9);
+        switch (s.protect)
+        {
+            case Protect::off:         return false;
+            case Protect::downbeat:    return b < 1.0e-6 || bpb - b < 1.0e-6;
+            case Protect::oneAndThree: return b < 1.0e-6 || bpb - b < 1.0e-6 || (std::fmod (bpb, 2.0) < 1.0e-6 && std::abs (b - bpb * 0.5) < 1.0e-6);
+            case Protect::allBeats:    return beat;
+            case Protect::twoAndFour:  return beat && ((int) std::round (b) % 2) == 1;
+            case Protect::offBeats:    return std::abs (f - 0.5) < 1.0e-6;
+        }
+        return false;
+    };
+    const bool strong = isKept (pos);
+
+    // Beats from this slice to the next ratchet target: the next KEEP position (with KEEP off,
+    // the next downbeat). Ratchets roll *into* the kept hits, so KEEP shapes the ratchet style.
+    double lead = bpb;
+    for (int k = 1; k <= (int) std::round (bpb / S); ++k)
+    {
+        const double p = pos + k * S;
+        if (s.protect == Protect::off ? wrapBeat (p, bpb) < 1.0e-6 : isKept (p))
+        {
+            lead = k * S;
+            break;
+        }
     }
 
     if (! strong)
@@ -247,18 +266,30 @@ SliceDecision StemEngine::decide (int j, int n, const StemSettings& s) const noe
             }
         }
 
-        // Ratchet zone override: only the offbeat half of every beat, or only beats 3 & 4.
+        // Hitech ratchets lead into the KEEP hits all through the bar: strongest on the slice
+        // right before a kept hit, fading out half a beat before it; a light background
+        // elsewhere; the bar end and the phrase-end bar get more.
+        const float leadIn = (float) juce::jmax (0.0, 1.0 - (lead - S) / 0.5);
+        if (s.style == GridStyle::hitech)
+            wRat = 0.2f + 1.4f * leadIn + (rollZone ? 0.5f : 0.0f);
+
+        // Ratchet zone: restrict to the offbeat half of every beat, or to beats 3 & 4.
         if (s.ratchetZone == 1)
-            wRat = frac >= 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+            wRat = frac >= 0.5 - 1.0e-9 ? juce::jmax (wRat, 0.8f) : 0.0f;
         else if (s.ratchetZone == 2)
-            wRat = inBar >= bpb * 0.5 - 1.0e-9 ? 1.0f : 0.0f;
+            wRat = inBar >= bpb * 0.5 - 1.0e-9 ? juce::jmax (wRat, 0.8f) : 0.0f;
 
         if (hash01 (seed, (juce::uint32) j, 3) < s.ratchet * wRat)
         {
-            // Straight subdivisions only, no triplets.
+            // Straight subdivisions only, no triplets; accelerating into the target:
+            // x4 on the slice right before it, x2 further out.
             int r;
-            if (rollZone)
-                r = (frac >= 0.5 - 1.0e-9 || (s.fillBar && beatIdx >= bpb - 1.0 - 1.0e-9)) ? 4 : 2; // accelerating roll
+            if (s.style == GridStyle::hitech && lead <= S + 1.0e-9)
+                r = 4;
+            else if (s.style == GridStyle::hitech && lead <= 0.5 + 1.0e-9)
+                r = 2;
+            else if (rollZone)
+                r = (frac >= 0.5 - 1.0e-9 || (s.fillBar && beatIdx >= bpb - 1.0 - 1.0e-9)) ? 4 : 2;
             else
                 r = hash01 (seed, (juce::uint32) j, 4) < 0.65f ? 2 : 4;
             const int maxR = (int) std::floor (S / 0.0625 + 1.0e-6); // no retrigger shorter than 1/64 note

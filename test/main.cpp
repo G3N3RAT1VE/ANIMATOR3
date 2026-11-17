@@ -302,8 +302,51 @@ int main()
     std::cout << "  ratcheted slices seen " << ratchets << ", on beat 4: " << ratchetsLastBeat
               << ", on beats 3-4: " << ratchetsLastTwo << ", in the groove zone: " << ratchetsGroove << "\n";
     check (noTriplets && ratchets > 100, "ratchet uses only x2 / x4, never triplets");
-    check (ratchetsLastBeat >= ratchets / 2 && ratchetsGroove <= ratchets / 10,
-           "hitech style puts the rolls at the end of the bar");
+    juce::ignoreUnused (ratchetsLastBeat, ratchetsLastTwo, ratchetsGroove);
+
+    // KEEP shapes the hitech ratchets: they roll *into* the kept hits all through the bar.
+    //   All Beats  -> rolls lead into every kick (x4 on the 16th right before the beat), never on a beat
+    //   Off-Beats  -> rolls lead into every offbeat, never on the "and"
+    for (const int keepIdx : { 4, 6 }) // stem KEEP choices: Global, Off, Downbeat, 1&3, All Beats, 2&4, Off-Beats
+    {
+        setParam (engine, "s1_keep", (float) keepIdx);
+        setParam (engine, "s1_arrange", 0.0f);
+        setParam (engine, "s1_ratchet", 0.8f);
+        const double target = keepIdx == 4 ? 0.0 : 0.5; // kept position inside the beat
+        int total = 0, onKept = 0, leadIn = 0, leadInX4 = 0;
+        std::set<int> beatsWithRolls;
+        for (int evo = 0; evo < 60; ++evo)
+        {
+            engine.requestEvolve (0, 0);
+            run (0.25);
+            auto& st = engine.getStem (0);
+            const double sl = st.dispSlice.load();
+            for (int j = 0; j < st.dispSlices.load(); ++j)
+            {
+                const auto d = riq::SliceDecision::unpack (st.sliceInfo[(size_t) j].load());
+                if (d.ratchet <= 1)
+                    continue;
+                ++total;
+                const double inBar = std::fmod (j * sl, 4.0);
+                const double f = inBar - std::floor (inBar);
+                beatsWithRolls.insert ((int) std::floor (inBar));
+                const double toTarget = std::fmod (target - f + 1.0, 1.0); // beats to the next kept hit
+                onKept += std::abs (f - target) < 1.0e-6 ? 1 : 0;
+                if (toTarget > 0.0 && toTarget <= 0.5 + 1.0e-9)
+                    ++leadIn;
+                if (std::abs (toTarget - sl) < 1.0e-6 && d.ratchet == 4)
+                    ++leadInX4;
+            }
+        }
+        std::cout << "  keep " << (keepIdx == 4 ? "All Beats" : "Off-Beats") << ": " << total << " rolls, lead-in "
+                  << leadIn << " (x4 right before the hit " << leadInX4 << "), on kept " << onKept
+                  << ", beats with rolls " << beatsWithRolls.size() << "\n";
+        check (total > 50 && onKept == 0 && leadIn >= total * 6 / 10 && leadInX4 > 0 && beatsWithRolls.size() >= 3,
+               keepIdx == 4 ? "KEEP All Beats: rolls lead into every kick, all through the bar"
+                            : "KEEP Off-Beats: rolls lead into every offbeat, all through the bar");
+    }
+    setParam (engine, "s1_keep", 0.0f);
+    setParam (engine, "s1_ratchet", 0.0f);
 
     // 3) Freeze (quantised to loop) then silence the input: frozen loop must keep playing.
     setParam (engine, "s1_ratchet", 0.0f);

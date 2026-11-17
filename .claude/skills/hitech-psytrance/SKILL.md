@@ -58,3 +58,7 @@ WAVs were **not** analysed (they cancelled that), so nothing below is measured f
 - Autopilot plan: `Source/Autopilot.h` `planAutopilotBar()` - pure function, also drawn by the
   phrase map in the editor.
 - Keep options: `Protect` enum (append only - saved sets store indices).
+- KEEP drives the hitech ratchet style: kept positions are roll *targets*. Ratchets lead into them
+  all through the bar (x4 on the slice right before the hit, x2 within half a beat), light background
+  elsewhere, extra at the bar end / phrase-end bar. KEEP Off = rolls lead into the next downbeat.
+  Ratchet zone (Auto / Offbeat / 3 & 4) only restricts where. User asked for this (2026-11-17).
