@@ -16,7 +16,7 @@ constexpr int kSceneParamsPerStem = 9;
 
 namespace ID
 {
-    inline const juce::String slot = "slot", sendThru = "sendThru", loopLen = "loopLen", protect = "protect",
+    inline const juce::String slot = "slot", sendThru = "sendThru", inLatency = "inLatency", loopLen = "loopLen", protect = "protect",
                               freezeQ = "freezeQ", sceneQ = "sceneQ", fillSize = "fillSize", fillNote = "fillNote",
                               masterGain = "masterGain", limiter = "limiter", iqArrange = "iqArrange",
                               iqEvolve = "iqEvolve", iqReverse = "iqReverse", scene = "scene",
@@ -161,6 +161,8 @@ private:
 
     double sr = 44100.0;
     int delaySamples = 512;
+    // Headroom for Sends whose input is late by their source tracks' plug-in latency (Input Latency param).
+    static constexpr double kInputLatencyHeadroomSec = 0.080;
     juce::int64 expectedTime = 0;
     int jumpMute = 0;
 

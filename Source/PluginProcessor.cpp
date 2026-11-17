@@ -16,12 +16,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
     using namespace juce;
     AudioProcessorValueTreeState::ParameterLayout layout;
 
+    // Live lists a plug-in's parameters by itself only while it has about 64 automatable ones, so setup-only
+    // parameters stay out of automation; everything played live (slices, scenes, autopilot) remains automatable.
+    const StringArray setupIds { "protect", "style", "fillNote", "limiter", "limCeiling", "limDrive", "limRelease" };
+    const StringArray setupStemSuffixes { "_src", "_out", "_keep", "_rzone", "_link" };
+    auto automatable = [&] (const String& id)
+    {
+        if (setupIds.contains (id))
+            return false;
+        for (auto& sfx : setupStemSuffixes)
+            if (id.startsWith ("s") && id.endsWith (sfx))
+                return false;
+        return true;
+    };
+
     auto choice = [&] (const String& id, const String& name, StringArray items, int def)
-    { layout.add (std::make_unique<AudioParameterChoice> (ParameterID { id, 1 }, name, items, def)); };
+    { layout.add (std::make_unique<AudioParameterChoice> (ParameterID { id, 1 }, name, items, def, AudioParameterChoiceAttributes().withAutomatable (automatable (id)))); };
     auto toggle = [&] (const String& id, const String& name, bool def)
-    { layout.add (std::make_unique<AudioParameterBool> (ParameterID { id, 1 }, name, def)); };
+    { layout.add (std::make_unique<AudioParameterBool> (ParameterID { id, 1 }, name, def, AudioParameterBoolAttributes().withAutomatable (automatable (id)))); };
     auto knob = [&] (const String& id, const String& name, float lo, float hi, float def, const String& label = {})
-    { layout.add (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, NormalisableRange<float> (lo, hi, 0.0f), def, AudioParameterFloatAttributes().withLabel (label))); };
+    { layout.add (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, NormalisableRange<float> (lo, hi, 0.0f), def, AudioParameterFloatAttributes().withLabel (label).withAutomatable (automatable (id)))); };
 
     const StringArray slices { "1/4", "1/8", "1/16", "1/32" };
 
@@ -29,6 +43,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
     {
         choice (ID::slot, "Slot", { "A", "B", "C" }, 0);
         toggle (ID::sendThru, "Send Thru", false);
+        // Plug-in latency of the tracks feeding this Send: Live delays their audio by that much before it reaches the
+        // return, but the playhead it reports is not delayed, so the Send stamps the audio this much earlier.
+        knob (ID::inLatency, "Input Latency", 0.0f, 80.0f, 0.0f, "ms");
         return layout;
     }
 
@@ -40,7 +57,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiqLiveProcessor::createLayo
     choice (ID::sceneQ, "Scene Quantize", { "Off", "Beat", "Bar", "2 Bars", "4 Bars", "8 Bars", "16 Bars" }, 2);
     choice (ID::style, "Grid Style", { "Classic", "Hitech" }, 1);
     choice (ID::fillSize, "Fill Size", slices, 1);
-    layout.add (std::make_unique<AudioParameterInt> (ParameterID { ID::fillNote, 1 }, "Fill Base Note", 0, 112, 36));
+    layout.add (std::make_unique<AudioParameterInt> (ParameterID { ID::fillNote, 1 }, "Fill Base Note", 0, 112, 36,
+                                                     AudioParameterIntAttributes().withAutomatable (false)));
     knob (ID::masterGain, "Master Gain", -24.0f, 12.0f, 0.0f, "dB");
     toggle (ID::limiter, "Limiter", true);
     knob (ID::limCeiling, "Limiter Ceiling", -3.0f, 0.0f, 0.0f, "dBTP");
@@ -142,7 +160,7 @@ bool RiqLiveProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void RiqLiveProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     sr = sampleRate;
-    delaySamples = juce::jmax (64, samplesPerBlock);
+    delaySamples = juce::jmax (64, samplesPerBlock) + (int) std::ceil (kInputLatencyHeadroomSec * sampleRate);
 
     if (sendMode)
     {
@@ -270,7 +288,9 @@ void RiqLiveProcessor::processSend (juce::AudioBuffer<float>& buffer, bool playi
 
     if (playing)
     {
-        entry.ring.write (t, L, R, n);
+        const auto inLat = (juce::int64) std::llround (juce::jlimit (0.0f, (float) (kInputLatencyHeadroomSec * 1000.0),
+                                                                      param (ID::inLatency)) * 0.001 * sr);
+        entry.ring.write (t - inLat, L, R, n);
         // While playing, the engine plays this track; stopped, it passes through.
         if (param (ID::sendThru) < 0.5f)
             buffer.clear();

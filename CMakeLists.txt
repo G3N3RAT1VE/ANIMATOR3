@@ -18,7 +18,10 @@ function(riq_setup target send)
         RIQ_SEND=${send}
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        JUCE_VST3_CAN_REPLACE_VST2=0)
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        # Only notes are read from MIDI; the 2048 emulated CC parameters made Live hide every real parameter
+        # (no automation, MIDI Map or ClyphX DEV access).
+        JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0)
     target_link_libraries(${target}
         PRIVATE
             juce::juce_audio_utils
